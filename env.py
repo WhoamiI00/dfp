@@ -21,10 +21,17 @@ class InventoryEnv(gym.Env):
 
         self._reset_internal()
 
+        # Reward parameters
         self.holding_cost = 0.01
         self.stockout_penalty = 1.0
         self.overstock_penalty = 0.1
         self.no_issue_bonus = 10.0
+        
+        # Tracking metrics
+        self.total_overstock_days = 0
+        self.total_understock_days = 0
+        self.perfect_days = 0
+        self.episode_rewards = []
 
     def _reset_internal(self):
         self.stocks = self.rng.integers(10, 50, size=self.num_products).astype(float)
@@ -38,6 +45,11 @@ class InventoryEnv(gym.Env):
         self.cumulative_sold = np.zeros(self.num_products)
         self.product_id = np.arange(self.num_products)
         self.days_passed = 0
+        
+        # Reset episode tracking
+        self.total_overstock_days = 0
+        self.total_understock_days = 0
+        self.perfect_days = 0
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -89,6 +101,18 @@ class InventoryEnv(gym.Env):
         holding_cost = self.holding_cost * self.stocks.sum()
         overstock_amount = np.maximum(0, self.stocks - (3 * self.avg_daily)).sum()
         total_unmet = unmet.sum()
+        
+        # Track overstock/understock per product
+        has_overstock = (self.stocks > 3 * self.avg_daily).sum()
+        has_understock = (unmet > 0).sum()
+        
+        # Day-level tracking
+        if has_overstock > 0:
+            self.total_overstock_days += 1
+        if has_understock > 0:
+            self.total_understock_days += 1
+        if has_overstock == 0 and has_understock == 0:
+            self.perfect_days += 1
 
         reward = (
             -holding_cost
@@ -109,6 +133,12 @@ class InventoryEnv(gym.Env):
             "stocks": self.stocks.tolist(),
             "outstanding": self.outstanding.tolist(),
             "last_order": self.last_order.tolist(),
+            "reward": float(reward),
+            "has_overstock": int(has_overstock),
+            "has_understock": int(has_understock),
+            "holding_cost": float(holding_cost),
+            "total_unmet": float(total_unmet),
+            "overstock_amount": float(overstock_amount),
         }
 
         return self._get_obs(), float(reward), terminated, False, info
