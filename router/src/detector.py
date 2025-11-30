@@ -99,16 +99,17 @@ class RobotDetector:
 class BlockDetector:
     """
     Detects blocks/objects in grid cells using background subtraction and contour detection.
+    NOW USES 50% THRESHOLD: If more than 50% of cell is empty, cell is marked EMPTY.
     """
     
-    def __init__(self, background_color=None, min_contour_area=100, min_area_ratio=0.1):
+    def __init__(self, background_color=None, min_contour_area=100, min_area_ratio=0.5):
         """
         Initialize block detector.
         
         Args:
             background_color: Expected background color in BGR (optional)
             min_contour_area: Minimum contour area to consider as a block
-            min_area_ratio: Minimum ratio of non-background pixels to consider as block
+            min_area_ratio: Minimum ratio of non-background pixels to consider as block (default: 0.5 = 50%)
         """
         self.background_color = background_color
         self.min_contour_area = min_contour_area
@@ -118,43 +119,35 @@ class BlockDetector:
     def detect(self, cell_image):
         """
         Detect if the cell contains a block/object.
+        Uses 50% threshold: Block is detected ONLY if more than 50% of cell area is occupied.
         
         Args:
             cell_image: Image of the grid cell
         
         Returns:
-            bool: True if block detected, False otherwise
+            bool: True if block detected (>50% occupied), False otherwise (>50% empty)
         """
         if cell_image is None or cell_image.size == 0:
             return False
         
-        # Method 1: Edge detection and contour area
+        # Convert to grayscale
         gray = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
         
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Edge detection
-        edges = cv2.Canny(blurred, 30, 100)
+        # Use Otsu's thresholding to separate bright objects (cards) from dark background (floor)
+        # Cards appear bright/white, floor appears dark/brown
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        # Find contours
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Check if there are significant contours
-        total_contour_area = 0
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > self.min_contour_area:
-                total_contour_area += area
-        
+        # Calculate ratio of bright (card) pixels to total pixels
         cell_area = cell_image.shape[0] * cell_image.shape[1]
-        contour_ratio = total_contour_area / cell_area
+        bright_pixels = cv2.countNonZero(binary)
+        occupied_ratio = bright_pixels / cell_area
         
-        # Method 2: Color variance (blocks usually have different texture than floor)
-        std_dev = np.std(gray)
-        
-        # Block detected if significant contours found OR high variance
-        return contour_ratio >= self.min_area_ratio or std_dev > 30
+        # Block detected ONLY if more than 50% is bright (occupied by card)
+        # If more than 50% is dark (floor), cell is marked EMPTY
+        return occupied_ratio > self.min_area_ratio
     
     
     def detect_with_background(self, cell_image, background_sample):
@@ -199,14 +192,14 @@ class CellClassifier:
     BLOCK = 1
     ROBOT = 2
     
-    def __init__(self, robot_color='red', robot_min_ratio=0.05, block_min_ratio=0.1):
+    def __init__(self, robot_color='red', robot_min_ratio=0.05, block_min_ratio=0.5):
         """
         Initialize cell classifier.
         
         Args:
             robot_color: Color of robot marker
             robot_min_ratio: Minimum color ratio for robot detection
-            block_min_ratio: Minimum area ratio for block detection
+            block_min_ratio: Minimum area ratio for block detection (default: 0.5 = 50%)
         """
         self.robot_detector = RobotDetector(color=robot_color, min_area_ratio=robot_min_ratio)
         self.block_detector = BlockDetector(min_area_ratio=block_min_ratio)
@@ -257,14 +250,14 @@ class CellClassifier:
         return classifications
 
 
-def create_detector(robot_color='red', robot_threshold=0.05, block_threshold=0.1):
+def create_detector(robot_color='red', robot_threshold=0.05, block_threshold=0.5):
     """
     Factory function to create a CellClassifier.
     
     Args:
         robot_color: Color of the robot marker
         robot_threshold: Minimum ratio for robot detection
-        block_threshold: Minimum ratio for block detection
+        block_threshold: Minimum ratio for block detection (default: 0.5 = 50%)
     
     Returns:
         CellClassifier: Initialized classifier

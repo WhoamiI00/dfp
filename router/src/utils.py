@@ -89,7 +89,7 @@ def draw_path_on_grid(image, path, n_rows, n_cols, color=(255, 0, 255), thicknes
 
 def annotate_grid_cells(image, grid, n_rows, n_cols):
     """
-    Annotate grid cells with their status (Robot, Block, Empty).
+    Annotate grid cells with their status (Robot, Block, Goal, Empty).
     
     Args:
         image: Input image (numpy array)
@@ -114,6 +114,9 @@ def annotate_grid_cells(image, grid, n_rows, n_cols):
             if grid[i, j] == 2:  # Robot
                 cv2.putText(result, 'R', (x_center - 10, y_center + 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            elif grid[i, j] == 3:  # Goal
+                cv2.putText(result, 'G', (x_center - 10, y_center + 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             elif grid[i, j] == 1:  # Block
                 cv2.putText(result, 'B', (x_center - 10, y_center + 10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)

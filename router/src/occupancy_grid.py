@@ -15,12 +15,14 @@ class OccupancyGrid:
         0 = FREE (empty cell)
         1 = BLOCK (occupied by object)
         2 = ROBOT (robot position)
+        3 = GOAL (goal/destination position)
     """
     
     # Cell type constants
     FREE = 0
     BLOCK = 1
     ROBOT = 2
+    GOAL = 3
     
     def __init__(self, n_rows, n_cols):
         """
@@ -34,6 +36,7 @@ class OccupancyGrid:
         self.n_cols = n_cols
         self.grid = np.zeros((n_rows, n_cols), dtype=int)
         self.robot_position = None
+        self.goal_position = None
     
     
     def set_cell(self, row, col, value):
@@ -43,7 +46,7 @@ class OccupancyGrid:
         Args:
             row: Row index
             col: Column index
-            value: Cell value (FREE, BLOCK, or ROBOT)
+            value: Cell value (FREE, BLOCK, ROBOT, or GOAL)
         """
         if 0 <= row < self.n_rows and 0 <= col < self.n_cols:
             self.grid[row, col] = value
@@ -51,6 +54,9 @@ class OccupancyGrid:
             # Track robot position
             if value == self.ROBOT:
                 self.robot_position = (row, col)
+            # Track goal position
+            elif value == self.GOAL:
+                self.goal_position = (row, col)
         else:
             print(f"Warning: Invalid cell coordinates ({row}, {col})")
     
@@ -188,6 +194,8 @@ class OccupancyGrid:
                 # Color based on cell type
                 if self.grid[i, j] == self.ROBOT:
                     color = (0, 0, 255)  # Red for robot
+                elif self.grid[i, j] == self.GOAL:
+                    color = (0, 255, 0)  # Green for goal
                 elif self.grid[i, j] == self.BLOCK:
                     color = (128, 128, 128)  # Gray for block
                 else:
@@ -195,6 +203,16 @@ class OccupancyGrid:
                 
                 cv2.rectangle(image, (x1, y1), (x2, y2), color, -1)
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 0), 1)
+                
+                # Add text labels
+                text_y = y1 + cell_size // 2 + 5
+                text_x = x1 + cell_size // 2 - 10
+                if self.grid[i, j] == self.ROBOT:
+                    cv2.putText(image, 'R', (text_x, text_y),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                elif self.grid[i, j] == self.GOAL:
+                    cv2.putText(image, 'G', (text_x, text_y),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         
         return image
     
@@ -204,7 +222,7 @@ class OccupancyGrid:
         Print the grid to console for debugging.
         """
         print("\nOccupancy Grid:")
-        print("  0 = Free, 1 = Block, 2 = Robot")
+        print("  0 = Free, 1 = Block, 2 = Robot, 3 = Goal")
         print("-" * (self.n_cols * 2 + 1))
         for i in range(self.n_rows):
             row_str = "|"

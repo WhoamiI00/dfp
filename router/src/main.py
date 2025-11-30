@@ -57,9 +57,9 @@ def parse_arguments():
     parser.add_argument('--cols', type=int, required=True, help='Number of grid columns')
     
     # Goal position
-    parser.add_argument('--goal', type=int, nargs=2, required=True,
+    parser.add_argument('--goal', type=int, nargs=2, required=False, default=None,
                         metavar=('ROW', 'COL'),
-                        help='Goal cell coordinates (row col)')
+                        help='Goal cell coordinates (row col). Required unless --manual-goal is set')
     
     # Corner detection method
     parser.add_argument('--corners', type=str, default='manual',
@@ -76,6 +76,12 @@ def parse_arguments():
                         help='Color of robot marker (default: red)')
     parser.add_argument('--manual-robot', action='store_true',
                         help='Manually click on robot position instead of automatic detection')
+    parser.add_argument('--manual-goal', action='store_true',
+                        help='Manually click on goal/destination position instead of using --goal')
+    
+    # Block detection parameters
+    parser.add_argument('--block-threshold', type=float, default=0.5,
+                        help='Minimum occupied ratio to mark cell as block (default: 0.5 = 50%%)')
     
     # Output parameters
     parser.add_argument('--output', type=str, help='Path to save output image')
@@ -100,6 +106,11 @@ def main():
     """
     # Parse arguments
     args = parse_arguments()
+    
+    # Validate arguments
+    if not args.manual_goal and args.goal is None:
+        print("Error: Either --goal or --manual-goal must be specified")
+        sys.exit(1)
     
     print("=" * 60)
     print("Overhead Vision-Based Inventory Robot Routing System")
@@ -154,54 +165,108 @@ def main():
     
     # Step 4: Initialize detector
     print(f"\n[4/8] Initializing detector (robot color: {args.robot_color})...")
-    classifier = CellClassifier(robot_color=args.robot_color)
+    print(f"Block threshold: {args.block_threshold * 100:.0f}% occupied to mark as BLOCK")
+    classifier = CellClassifier(robot_color=args.robot_color, block_min_ratio=args.block_threshold)
     
     # Step 5: Build occupancy grid
     print("\n[5/8] Building occupancy grid...")
     
-    # Manual robot selection if requested
-    if args.manual_robot:
-        print("Manual robot selection mode enabled")
-        print("Click on the robot in the grid...")
+    # Manual robot and goal selection if requested
+    if args.manual_robot or args.manual_goal:
+        print("Manual selection mode enabled")
         
         # Create a copy of the grid image for display
         grid_display = grid_mapper.draw_grid(color=(0, 255, 0), thickness=2)
         
-        selected_cell = [None]
+        selected_robot = [None]
+        selected_goal = [None]
+        current_mode = ['robot' if args.manual_robot else 'goal']
         
         def mouse_callback(event, x, y, flags, param):
             if event == cv2.EVENT_LBUTTONDOWN:
                 row, col = grid_mapper.pixel_to_grid(x, y)
-                selected_cell[0] = (row, col)
-                # Draw a marker
-                temp_img = param.copy()
-                cell_x, cell_y = grid_mapper.grid_to_pixel(row, col)
-                cv2.circle(temp_img, (cell_x, cell_y), 10, (0, 0, 255), -1)
-                cv2.putText(temp_img, f"Robot: ({row},{col})", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.imshow("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", temp_img)
+                temp_img = param['base_img'].copy()
+                
+                if current_mode[0] == 'robot':
+                    selected_robot[0] = (row, col)
+                    cell_x, cell_y = grid_mapper.grid_to_pixel(row, col)
+                    cv2.circle(temp_img, (cell_x, cell_y), 10, (0, 0, 255), -1)
+                    cv2.putText(temp_img, f"Robot: ({row},{col})", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    param['robot_pos'] = (row, col)
+                elif current_mode[0] == 'goal':
+                    selected_goal[0] = (row, col)
+                    # Redraw robot if already selected
+                    if param['robot_pos'] is not None:
+                        rx, ry = grid_mapper.grid_to_pixel(param['robot_pos'][0], param['robot_pos'][1])
+                        cv2.circle(temp_img, (rx, ry), 10, (0, 0, 255), -1)
+                        cv2.putText(temp_img, f"Robot: {param['robot_pos']}", (10, 30),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    # Draw goal
+                    cell_x, cell_y = grid_mapper.grid_to_pixel(row, col)
+                    cv2.circle(temp_img, (cell_x, cell_y), 10, (255, 0, 255), -1)
+                    cv2.putText(temp_img, f"Goal: ({row},{col})", (10, 60),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                
+                cv2.imshow("Select Cells - Press ENTER to confirm, ESC to cancel", temp_img)
         
-        cv2.imshow("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", grid_display)
-        cv2.setMouseCallback("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", 
-                           mouse_callback, grid_display)
+        param_dict = {'base_img': grid_display, 'robot_pos': None}
+        
+        # Show instruction
+        if args.manual_robot and args.manual_goal:
+            print("Step 1: Click on ROBOT cell, then press ENTER")
+            instruction = "Step 1/2: Click ROBOT cell"
+        elif args.manual_robot:
+            print("Click on ROBOT cell, then press ENTER")
+            instruction = "Click ROBOT cell"
+        else:
+            print("Click on GOAL cell, then press ENTER")
+            instruction = "Click GOAL cell"
+        
+        display_img = grid_display.copy()
+        cv2.putText(display_img, instruction, (10, display_img.shape[0] - 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        
+        cv2.imshow("Select Cells - Press ENTER to confirm, ESC to cancel", display_img)
+        cv2.setMouseCallback("Select Cells - Press ENTER to confirm, ESC to cancel", 
+                           mouse_callback, param_dict)
         
         while True:
             key = cv2.waitKey(1) & 0xFF
-            if key == 13 and selected_cell[0] is not None:  # ENTER
-                break
+            if key == 13:  # ENTER
+                if current_mode[0] == 'robot' and selected_robot[0] is not None:
+                    if args.manual_goal:
+                        # Move to goal selection
+                        print(f"Robot selected at: {selected_robot[0]}")
+                        print("Step 2: Click on GOAL cell, then press ENTER")
+                        current_mode[0] = 'goal'
+                        display_img = grid_display.copy()
+                        rx, ry = grid_mapper.grid_to_pixel(selected_robot[0][0], selected_robot[0][1])
+                        cv2.circle(display_img, (rx, ry), 10, (0, 0, 255), -1)
+                        cv2.putText(display_img, f"Robot: {selected_robot[0]}", (10, 30),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(display_img, "Step 2/2: Click GOAL cell", (10, display_img.shape[0] - 20),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                        cv2.imshow("Select Cells - Press ENTER to confirm, ESC to cancel", display_img)
+                    else:
+                        break
+                elif current_mode[0] == 'goal' and selected_goal[0] is not None:
+                    break
             elif key == 27:  # ESC
-                print("Robot selection cancelled")
+                print("Selection cancelled")
                 camera_stream.release()
                 cv2.destroyAllWindows()
                 sys.exit(1)
         
         cv2.destroyAllWindows()
         
-        # Build occupancy grid without robot detection, then manually set robot
+        # Build occupancy grid
         occupancy_grid = build_occupancy_grid(grid_mapper, classifier)
-        manual_robot_pos = selected_cell[0]
-        occupancy_grid.set_cell(manual_robot_pos[0], manual_robot_pos[1], occupancy_grid.ROBOT)
-        print(f"Robot manually placed at: {manual_robot_pos}")
+        
+        # Set manual robot position
+        if args.manual_robot and selected_robot[0] is not None:
+            occupancy_grid.set_cell(selected_robot[0][0], selected_robot[0][1], occupancy_grid.ROBOT)
+            print(f"Robot manually placed at: {selected_robot[0]}")
     else:
         # Automatic detection
         occupancy_grid = build_occupancy_grid(grid_mapper, classifier)
@@ -220,8 +285,16 @@ def main():
     
     print(f"Robot found at position: {robot_pos}")
     
-    # Step 7: Plan path to goal
-    goal_pos = tuple(args.goal)
+    # Step 7: Determine goal position
+    if args.manual_goal and selected_goal[0] is not None:
+        goal_pos = selected_goal[0]
+        print(f"Goal manually selected at: {goal_pos}")
+    else:
+        goal_pos = tuple(args.goal)
+    
+    # Mark goal in occupancy grid for visualization
+    occupancy_grid.set_cell(goal_pos[0], goal_pos[1], occupancy_grid.GOAL)
+    
     print(f"\n[7/8] Planning path from {robot_pos} to {goal_pos}...")
     
     path = find_path(robot_pos, goal_pos, occupancy_grid, algorithm=args.algorithm)
