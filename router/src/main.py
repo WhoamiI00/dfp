@@ -66,10 +66,16 @@ def parse_arguments():
                         choices=['manual', 'aruco', 'contour'],
                         help='Corner detection method (default: manual)')
     
+    # Skip homography if image is already cropped/aligned
+    parser.add_argument('--skip-homography', action='store_true',
+                        help='Skip corner detection and homography (use if image is already cropped top-down view)')
+    
     # Robot detection parameters
     parser.add_argument('--robot-color', type=str, default='red',
-                        choices=['red', 'blue', 'green', 'yellow'],
+                        choices=['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink', 'cyan', 'white', 'black'],
                         help='Color of robot marker (default: red)')
+    parser.add_argument('--manual-robot', action='store_true',
+                        help='Manually click on robot position instead of automatic detection')
     
     # Output parameters
     parser.add_argument('--output', type=str, help='Path to save output image')
@@ -119,21 +125,28 @@ def main():
     
     print(f"Input loaded: {frame.shape[1]}x{frame.shape[0]}")
     
-    # Step 2: Detect corners and compute homography
-    print("\n[2/8] Detecting corners and computing homography...")
-    top_down, homography = get_top_down_view(
-        frame,
-        width=args.warp_size,
-        height=args.warp_size,
-        auto_detect=args.corners
-    )
-    
-    if top_down is None:
-        print("Error: Failed to create top-down view")
-        camera_stream.release()
-        sys.exit(1)
-    
-    print("Top-down view created successfully")
+    # Step 2: Detect corners and compute homography (or skip if already cropped)
+    if args.skip_homography:
+        print("\n[2/8] Skipping homography (image already cropped)...")
+        # Resize to standard size for consistency
+        top_down = cv2.resize(frame, (args.warp_size, args.warp_size))
+        homography = None
+        print(f"Image resized to {args.warp_size}x{args.warp_size}")
+    else:
+        print("\n[2/8] Detecting corners and computing homography...")
+        top_down, homography = get_top_down_view(
+            frame,
+            width=args.warp_size,
+            height=args.warp_size,
+            auto_detect=args.corners
+        )
+        
+        if top_down is None:
+            print("Error: Failed to create top-down view")
+            camera_stream.release()
+            sys.exit(1)
+        
+        print("Top-down view created successfully")
     
     # Step 3: Create grid mapper
     print(f"\n[3/8] Creating {args.rows}x{args.cols} grid mapper...")
@@ -145,7 +158,54 @@ def main():
     
     # Step 5: Build occupancy grid
     print("\n[5/8] Building occupancy grid...")
-    occupancy_grid = build_occupancy_grid(grid_mapper, classifier)
+    
+    # Manual robot selection if requested
+    if args.manual_robot:
+        print("Manual robot selection mode enabled")
+        print("Click on the robot in the grid...")
+        
+        # Create a copy of the grid image for display
+        grid_display = grid_mapper.draw_grid(color=(0, 255, 0), thickness=2)
+        
+        selected_cell = [None]
+        
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                row, col = grid_mapper.pixel_to_grid(x, y)
+                selected_cell[0] = (row, col)
+                # Draw a marker
+                temp_img = param.copy()
+                cell_x, cell_y = grid_mapper.grid_to_pixel(row, col)
+                cv2.circle(temp_img, (cell_x, cell_y), 10, (0, 0, 255), -1)
+                cv2.putText(temp_img, f"Robot: ({row},{col})", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.imshow("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", temp_img)
+        
+        cv2.imshow("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", grid_display)
+        cv2.setMouseCallback("Click on Robot Cell - Press ENTER to confirm, ESC to cancel", 
+                           mouse_callback, grid_display)
+        
+        while True:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 13 and selected_cell[0] is not None:  # ENTER
+                break
+            elif key == 27:  # ESC
+                print("Robot selection cancelled")
+                camera_stream.release()
+                cv2.destroyAllWindows()
+                sys.exit(1)
+        
+        cv2.destroyAllWindows()
+        
+        # Build occupancy grid without robot detection, then manually set robot
+        occupancy_grid = build_occupancy_grid(grid_mapper, classifier)
+        manual_robot_pos = selected_cell[0]
+        occupancy_grid.set_cell(manual_robot_pos[0], manual_robot_pos[1], occupancy_grid.ROBOT)
+        print(f"Robot manually placed at: {manual_robot_pos}")
+    else:
+        # Automatic detection
+        occupancy_grid = build_occupancy_grid(grid_mapper, classifier)
+    
     occupancy_grid.print_grid()
     
     # Step 6: Get robot position

@@ -38,6 +38,24 @@ class RobotDetector:
             ],
             'yellow': [
                 (np.array([20, 100, 100]), np.array([30, 255, 255]))
+            ],
+            'orange': [
+                (np.array([10, 100, 100]), np.array([25, 255, 255]))
+            ],
+            'purple': [
+                (np.array([130, 50, 50]), np.array([160, 255, 255]))
+            ],
+            'pink': [
+                (np.array([140, 50, 50]), np.array([170, 255, 255]))
+            ],
+            'cyan': [
+                (np.array([80, 100, 100]), np.array([100, 255, 255]))
+            ],
+            'white': [
+                (np.array([0, 0, 200]), np.array([180, 30, 255]))
+            ],
+            'black': [
+                (np.array([0, 0, 0]), np.array([180, 255, 50]))
             ]
         }
         

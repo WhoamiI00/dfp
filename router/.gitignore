@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Test images (keep directory, ignore contents)
+data/sample_images/*.jpg
+data/sample_images/*.jpeg
+data/sample_images/*.png
+!data/sample_images/README.md
+
+# Output files
+output/
+results/
+*.jpg
+*.png
+*.mp4
+*.avi
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
