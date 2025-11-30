@@ -76,9 +76,9 @@ Demand depends on **day of week**:
 
 | Day           | Demand Range |
 | ------------- | ------------ |
-| Monday–Friday | `0–10`       |
-| Saturday      | `10–20`      |
-| Sunday        | `20–30`      |
+| Monday–Friday | `0–15`       |
+| Saturday      | `15–30`      |
+| Sunday        | `30–50`      |
 
 Plus a **trend factor**:
 

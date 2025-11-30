@@ -42,20 +42,20 @@ class EOQBaseline:
     """
     
     def __init__(self, 
-                 avg_daily_demand=10,
+                 avg_daily_demand=20,
                  episode_length=30,
                  ordering_cost=50,
                  holding_cost=1,
-                 reorder_point=20):
+                 reorder_point=40):
         """
         Initialize EOQ baseline policy.
         
         Args:
-            avg_daily_demand: Average daily demand (default: 10)
+            avg_daily_demand: Average daily demand (default: 20, reflects Mon-Fri 0-15, Sat 15-30, Sun 30-50)
             episode_length: Length of planning period in days (default: 30)
             ordering_cost: Fixed cost per order (default: 50)
             holding_cost: Cost per unit per day (default: 1)
-            reorder_point: Inventory level that triggers reorder (default: 20)
+            reorder_point: Inventory level that triggers reorder (default: 40)
         """
         self.avg_daily_demand = avg_daily_demand
         self.episode_length = episode_length
@@ -143,5 +143,5 @@ def estimate_demand(env, num_episodes=10):
             total_demand += info.get('demand', 0)
             total_days += 1
     
-    avg_demand = total_demand / total_days if total_days > 0 else 10
+    avg_demand = total_demand / total_days if total_days > 0 else 20
     return avg_demand

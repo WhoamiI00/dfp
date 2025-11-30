@@ -58,7 +58,7 @@ def run_eoq_policy():
     print("=" * 60)
     
     env = InventoryEnv()
-    baseline = EOQBaseline(avg_daily_demand=10, reorder_point=30)
+    baseline = EOQBaseline(avg_daily_demand=20, reorder_point=40)
     
     print(f"Baseline: {baseline}")
     

@@ -98,7 +98,7 @@ def test_baseline_episode():
     print("=" * 60)
     
     env = InventoryEnv()
-    baseline = EOQBaseline(avg_daily_demand=10, reorder_point=30)
+    baseline = EOQBaseline(avg_daily_demand=20, reorder_point=40)
     
     obs, _ = env.reset()
     total_reward = 0

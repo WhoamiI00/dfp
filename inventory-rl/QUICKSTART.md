@@ -98,9 +98,9 @@ To modify environment parameters, edit `env/inventory_env.py`:
 - -1 for constraint violations
 
 **Demand Patterns:**
-- Monday-Friday: 0-10 units
-- Saturday: 10-20 units
-- Sunday: 20-30 units
+- Monday-Friday: 0-15 units
+- Saturday: 15-30 units
+- Sunday: 30-50 units
 - Increasing trend over 30 days
 
 **Action Space:**

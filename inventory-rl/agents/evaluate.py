@@ -301,7 +301,7 @@ def main():
     
     # Evaluate EOQ baseline
     print("\nEvaluating EOQ baseline...")
-    baseline = EOQBaseline(avg_daily_demand=10, reorder_point=30)
+    baseline = EOQBaseline(avg_daily_demand=20, reorder_point=40)
     baseline_results = evaluate_baseline(baseline, env, num_episodes=args.episodes)
     
     print(f"EOQ Baseline Mean Reward: {baseline_results['mean_reward']:.2f} ± {baseline_results['std_reward']:.2f}")

@@ -113,6 +113,14 @@ python agents/train_dqn.py
 
 Press `Ctrl+C` in the terminal where Streamlit is running.
 
+## Demand Model
+
+The environment uses realistic demand patterns:
+- **Monday-Friday**: 0-15 units
+- **Saturday**: 15-30 units
+- **Sunday**: 30-50 units
+- **Trend Factor**: Demand increases over the 30-day episode
+
 ## Next Steps
 
 After exploring the dashboard:

@@ -413,7 +413,7 @@ def main():
                 st.info("🎲 Using Random Policy")
             elif policy_type == "EOQ Baseline":
                 policy_key = "eoq"
-                baseline = EOQBaseline(avg_daily_demand=10, reorder_point=30)
+                baseline = EOQBaseline(avg_daily_demand=20, reorder_point=40)
                 st.info(f"📊 Using EOQ Baseline: {baseline}")
             elif policy_type == "Trained RL Policy":
                 policy_key = "rl"
@@ -536,6 +536,13 @@ def main():
         - **Random Policy**: Randomly selects order quantities (baseline for comparison)
         - **EOQ Baseline**: Uses Economic Order Quantity formula for systematic ordering
         - **Trained RL Policy**: Uses a trained Deep Q-Network or PPO agent
+        
+        ### 📊 Demand Model
+        
+        - **Monday-Friday**: 0-15 units
+        - **Saturday**: 15-30 units
+        - **Sunday**: 30-50 units
+        - Plus a trend factor that increases demand over time
         
         ### 📊 Key Metrics
         

@@ -70,9 +70,9 @@ class InventoryEnv(gym.Env):
         Generate demand based on day of week and trend.
         
         Demand ranges:
-        - Monday-Friday: 0-10 units
-        - Saturday: 10-20 units
-        - Sunday: 20-30 units
+        - Monday-Friday: 0-15 units
+        - Saturday: 15-30 units
+        - Sunday: 30-50 units
         
         Plus a trend component that increases over the episode.
         
@@ -81,11 +81,11 @@ class InventoryEnv(gym.Env):
         """
         # Base demand by day of week
         if self.day_of_week < 5:  # Monday-Friday
-            base_demand = np.random.randint(0, 11)
+            base_demand = np.random.randint(0, 16)
         elif self.day_of_week == 5:  # Saturday
-            base_demand = np.random.randint(10, 21)
+            base_demand = np.random.randint(15, 31)
         else:  # Sunday
-            base_demand = np.random.randint(20, 31)
+            base_demand = np.random.randint(30, 51)
         
         # Add trend component
         trend = self.day_index / self.episode_length

@@ -140,6 +140,12 @@ Dashboard opens at: `http://localhost:8501`
 - Adjust capacity constraints
 - Explore sensitivity to parameters
 
+**Note**: The environment uses realistic demand patterns:
+- Weekdays (Mon-Fri): 0-15 units
+- Saturday: 15-30 units  
+- Sunday: 30-50 units
+- Plus increasing trend over 30 days
+
 ### Model Evaluation
 - Evaluate trained RL models interactively
 - Compare RL performance to baselines

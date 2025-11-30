@@ -50,6 +50,14 @@ The Streamlit dashboard provides an interactive web interface for simulating and
 - Red bars: Violation days (-1 reward)
 - Shows policy performance at a glance
 
+### Demand Model
+
+The environment simulates realistic demand patterns:
+- **Weekdays (Mon-Fri)**: 0-15 units per day
+- **Saturday**: 15-30 units per day  
+- **Sunday**: 30-50 units per day
+- **Trend Factor**: Demand gradually increases over the 30-day episode
+
 **Daily Details Table**
 - Complete day-by-day breakdown:
   - Day number and day of week
