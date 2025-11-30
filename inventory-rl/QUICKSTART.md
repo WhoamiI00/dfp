@@ -27,6 +27,7 @@ Models are saved to `models/` directory.
 
 ### 3. Evaluate the Model
 
+**Option A: Command Line Evaluation**
 ```bash
 cd agents
 python evaluate.py --model dqn --episodes 10
@@ -42,6 +43,21 @@ Results will be saved to `results/` directory with visualizations:
 - `demand_supply.png` - Demand vs supply comparison
 - `reward_comparison.png` - RL vs EOQ baseline
 - `heatmap.png` - State visitation heatmap
+
+**Option B: Interactive Streamlit Dashboard**
+```bash
+streamlit run streamlit_app.py
+```
+
+The dashboard provides:
+- Policy selection dropdown (Random, EOQ, Trained RL)
+- Configurable number of episodes and environment parameters
+- Real-time visualizations of inventory, demand, orders, and rewards
+- Aggregate metrics across multiple episodes
+- Detailed daily logs table
+- Optional state visitation heatmap
+
+Open your browser to `http://localhost:8501` to interact with the dashboard.
 
 ### 4. View TensorBoard Logs (Optional)
 

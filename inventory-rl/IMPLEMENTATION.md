@@ -32,7 +32,10 @@ inventory-rl/
 │
 ├── README.md                     ✓ Complete documentation
 ├── QUICKSTART.md                 ✓ Quick start guide
+├── STREAMLIT_GUIDE.md            ✓ Dashboard usage guide
 ├── requirements.txt              ✓ Dependencies
+├── streamlit_app.py              ✓ Interactive web dashboard
+├── run_dashboard.py              ✓ Dashboard launcher
 └── test_environment.py           ✓ Environment tests
 ```
 
@@ -182,6 +185,15 @@ python agents/evaluate.py --model dqn --episodes 10
 python agents/evaluate.py --model ppo --episodes 10
 ```
 
+### Launch Interactive Dashboard
+```bash
+streamlit run streamlit_app.py
+```
+Or use the launcher:
+```bash
+python run_dashboard.py
+```
+
 ### View TensorBoard
 ```bash
 tensorboard --logdir logs/
@@ -224,6 +236,7 @@ Beyond the README requirements, the following helpful additions were made:
 - ✓ Detailed progress output during training
 - ✓ .gitkeep files for empty directories
 - ✓ Package __init__.py files for clean imports
+- ✓ **Interactive Streamlit Dashboard** for web-based simulation and visualization
 
 ## 🎓 Code Architecture Highlights
 
@@ -244,6 +257,16 @@ Beyond the README requirements, the following helpful additions were made:
 - Statistical analysis
 - Baseline comparison
 - Flexible command-line interface
+
+**Streamlit Dashboard:**
+- Interactive web interface
+- Real-time policy comparison
+- Configurable parameters
+- Multiple visualizations
+- No-code simulation
+- Aggregate metrics display
+- Daily details table
+- Optional state heatmap
 
 ## 🏁 Conclusion
 

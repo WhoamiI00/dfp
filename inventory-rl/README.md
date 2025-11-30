@@ -282,6 +282,8 @@ models/best_model.zip
 
 # 📊 1️⃣2️⃣ How to Evaluate
 
+## **Command Line Evaluation**
+
 ```bash
 python agents/evaluate.py
 ```
@@ -292,6 +294,20 @@ This will output:
 * Demand vs supply curve
 * Reward per episode
 * Heatmap of state visitation
+
+## **Interactive Streamlit Dashboard**
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Features:
+* Interactive policy selection (Random, EOQ, Trained RL)
+* Real-time visualization of inventory levels, demand, and orders
+* Aggregate metrics across multiple episodes
+* Daily details table
+* State visitation heatmap (optional)
+* Configurable environment parameters
 
 ---
 
