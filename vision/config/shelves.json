@@ -2,39 +2,39 @@
   "shelves": [
     {
       "id": "shelf_A",
-      "x_m": 0.5,
-      "y_m": 2.0,
+      "x_m": 0.619,
+      "y_m": 1.976,
       "width_m": 0.4,
       "length_m": 0.3,
       "rotation_deg": 0,
       "approach_point": {
-        "x_m": 0.5,
+        "x_m": 0.619,
         "y_m": 1.25,
         "heading_deg": 90
       }
     },
     {
       "id": "shelf_B",
-      "x_m": 1.25,
-      "y_m": 2.0,
+      "x_m": 1.179,
+      "y_m": 1.990,
       "width_m": 0.4,
       "length_m": 0.3,
       "rotation_deg": 0,
       "approach_point": {
-        "x_m": 1.25,
+        "x_m": 1.179,
         "y_m": 1.25,
         "heading_deg": 90
       }
     },
     {
       "id": "shelf_C",
-      "x_m": 2.0,
-      "y_m": 2.0,
+      "x_m": 1.654,
+      "y_m": 1.992,
       "width_m": 0.4,
       "length_m": 0.3,
       "rotation_deg": 0,
       "approach_point": {
-        "x_m": 2.0,
+        "x_m": 1.654,
         "y_m": 1.25,
         "heading_deg": 90
       }

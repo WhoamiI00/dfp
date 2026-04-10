@@ -1,5 +1,6 @@
 """Occupancy grid construction."""
 import math
+from collections import deque
 import numpy as np
 from vision.src.models import Settings, Shelf
 from vision.src.planning.errors import ApproachPointBlockedError
@@ -27,6 +28,48 @@ def cell_to_world(rc: tuple[int, int], settings: Settings) -> tuple[float, float
     row, col = rc
     s = settings.workspace.cell_size_m
     return col * s + s / 2, row * s + s / 2
+
+
+def snap_to_free_cell(
+    grid: np.ndarray,
+    cell: tuple[int, int],
+    max_radius_cells: int = 8,
+) -> tuple[int, int] | None:
+    """Return the nearest unoccupied cell to `cell` via 8-connected BFS.
+
+    If `cell` itself is free (or out of bounds but near a free cell), returns
+    it unchanged. Returns None if no free cell exists within `max_radius_cells`
+    steps. Used to recover a valid planning anchor when the detected robot
+    pose happens to fall inside an inflated obstacle zone — a common failure
+    mode when extrinsic calibration is approximate or the robot is physically
+    close to a shelf edge.
+    """
+    rows, cols = grid.shape
+    r0, c0 = cell
+    in_bounds = 0 <= r0 < rows and 0 <= c0 < cols
+    if in_bounds and grid[r0, c0] == 0:
+        return cell
+
+    visited: set[tuple[int, int]] = {(r0, c0)}
+    q: deque[tuple[int, int, int]] = deque([(r0, c0, 0)])
+    neighbours = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+    while q:
+        r, c, d = q.popleft()
+        if d > max_radius_cells:
+            continue
+        if 0 <= r < rows and 0 <= c < cols and grid[r, c] == 0:
+            return (r, c)
+        for dr, dc in neighbours:
+            nr, nc = r + dr, c + dc
+            if (nr, nc) in visited:
+                continue
+            visited.add((nr, nc))
+            q.append((nr, nc, d + 1))
+    return None
 
 
 def _rasterize_shelf(shelf: Shelf, grid: np.ndarray, settings: Settings) -> None:

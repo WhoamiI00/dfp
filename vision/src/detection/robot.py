@@ -47,8 +47,34 @@ def _largest_blob_centroid(mask: np.ndarray) -> tuple[float, float, int] | None:
     return result
 
 
+def _all_blob_centroids(mask: np.ndarray) -> list[tuple[float, float, int]]:
+    """Return (cx, cy, area) for every contour above MIN_MARKER_AREA_PX."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out: list[tuple[float, float, int]] = []
+    for c in contours:
+        area = int(cv2.contourArea(c))
+        if area < MIN_MARKER_AREA_PX:
+            continue
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        out.append((M["m10"] / M["m00"], M["m01"] / M["m00"], area))
+    return out
+
+
 # Backwards-compat alias
 _mask_for_ranges = mask_for_ranges
+
+
+# Maximum pixel distance allowed between the front and back marker centroids,
+# expressed as a fraction of the image width. Done in pixel space (not floor-
+# plane metres) so the proximity filter stays robust even when extrinsic
+# calibration is slightly off or uncalibrated test images are being used. A
+# ratio (rather than a fixed pixel count) keeps the behaviour consistent
+# across resolutions: 15% of width is roomy enough for any reasonable marker
+# pair while still rejecting distant decoys like a coloured shelf in the
+# background.
+MAX_MARKER_PIXEL_DISTANCE_RATIO = 0.15
 
 
 def detect_robot(
@@ -58,15 +84,25 @@ def detect_robot(
     travel_height_m: float,
     front_ranges: list[HsvRange] | None = None,
     back_ranges: list[HsvRange] | None = None,
+    max_marker_pixel_distance: float | None = None,
 ) -> RobotPose | None:
     """Detect the robot's pose in a BGR frame. Returns None if markers are missing.
 
     `front_ranges` and `back_ranges` override the default red/green HSV ranges.
+    `max_marker_pixel_distance` bounds the image-space distance between the
+    front and back marker centroids; back-mask blobs farther than this from
+    the front marker are treated as scene decoys (e.g. a coloured shelf) and
+    skipped. Done in pixel space, not world space, so the filter keeps
+    working even when extrinsic calibration is wrong or approximate. Defaults
+    to `MAX_MARKER_PIXEL_DISTANCE_RATIO * image_width` so the same behaviour
+    holds across resolutions.
     """
     if front_ranges is None:
         front_ranges = RED_HSV_RANGES
     if back_ranges is None:
         back_ranges = GREEN_HSV_RANGES
+    if max_marker_pixel_distance is None:
+        max_marker_pixel_distance = MAX_MARKER_PIXEL_DISTANCE_RATIO * frame.shape[1]
 
     undistorted = cv2.undistort(frame, intrinsics.camera_matrix, intrinsics.dist_coeffs)
     hsv = cv2.cvtColor(undistorted, cv2.COLOR_BGR2HSV)
@@ -75,12 +111,27 @@ def detect_robot(
     back_mask = mask_for_ranges(hsv, back_ranges)
 
     front_blob = _largest_blob_centroid(front_mask)
-    back_blob = _largest_blob_centroid(back_mask)
-    if front_blob is None or back_blob is None:
+    if front_blob is None:
+        return None
+    front_cx, front_cy, front_area = front_blob
+
+    back_candidates = _all_blob_centroids(back_mask)
+    if not back_candidates:
         return None
 
-    front_cx, front_cy, front_area = front_blob
-    back_cx, back_cy, back_area = back_blob
+    best: tuple[float, float, int] | None = None
+    best_dist = float("inf")
+    for cx, cy, area in back_candidates:
+        dist = math.hypot(cx - front_cx, cy - front_cy)
+        if dist > max_marker_pixel_distance:
+            continue
+        if dist < best_dist:
+            best_dist = dist
+            best = (cx, cy, area)
+
+    if best is None:
+        return None
+    back_cx, back_cy, back_area = best
 
     front_floor = project_pixel_to_floor(
         (front_cx, front_cy), travel_height_m, intrinsics, extrinsics

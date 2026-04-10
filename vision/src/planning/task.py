@@ -2,7 +2,10 @@
 from vision.src.models import (
     Settings, Shelf, Pose2D, Waypoint, GrabWaypoint, PlaceWaypoint,
 )
-from vision.src.planning.grid import build_occupancy_grid, world_to_cell
+from vision.src.planning.errors import NoPathError
+from vision.src.planning.grid import (
+    build_occupancy_grid, world_to_cell, snap_to_free_cell,
+)
 from vision.src.planning.astar import a_star
 from vision.src.planning.motion import decompose_to_waypoints
 
@@ -27,6 +30,16 @@ def plan_navigate_to(
     goal_cell = world_to_cell(
         (target.approach_point.x_m, target.approach_point.y_m), settings
     )
+
+    # Snap the start to the nearest free cell if the detected pose lands
+    # inside an inflated obstacle zone (happens with approximate calibration
+    # or when the robot is physically right beside a shelf).
+    snapped_start = snap_to_free_cell(grid, start_cell)
+    if snapped_start is None:
+        raise NoPathError(
+            f"Start cell {start_cell} is blocked and no free cell is reachable nearby"
+        )
+    start_cell = snapped_start
 
     cell_path = a_star(grid, start_cell, goal_cell)
     return decompose_to_waypoints(

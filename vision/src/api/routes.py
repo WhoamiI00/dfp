@@ -31,7 +31,7 @@ from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
 from vision.src.rendering.overlay import draw_overlay
 from vision.src.models import (
-    Shelf, ApproachPoint, ExtrinsicMarker, Pose2D,
+    Shelf, ApproachPoint, Extrinsics, ExtrinsicMarker, Pose2D,
     TurnWaypoint, DriveWaypoint, GrabWaypoint, PlaceWaypoint, ArriveWaypoint,
 )
 
@@ -474,7 +474,37 @@ def plan(request: PlanRequest):
             status_code=422,
             detail={"error": "robot_not_detected"},
         )
-    current = Pose2D(x_m=pose.x_m, y_m=pose.y_m, heading_deg=pose.heading_deg)
+
+    # Clamp small calibration-induced overshoots to the workspace edge so the
+    # planner doesn't hard-fail on slightly-off extrinsics. Only error out if
+    # the pose is wildly outside — more than 1 workspace width/height away —
+    # which almost certainly means calibration is fundamentally wrong.
+    ws = settings.workspace
+    tolerance_w = ws.width_m
+    tolerance_h = ws.height_m
+    if (
+        pose.x_m < -tolerance_w
+        or pose.x_m > 2 * ws.width_m
+        or pose.y_m < -tolerance_h
+        or pose.y_m > 2 * ws.height_m
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "robot_outside_workspace",
+                "message": (
+                    f"Detected robot pose ({pose.x_m:.2f}, {pose.y_m:.2f}) m is "
+                    f"far outside the {ws.width_m:.2f} x {ws.height_m:.2f} m "
+                    "workspace. Extrinsic calibration is wrong for this image — "
+                    "re-run the manual 4-corner calibration."
+                ),
+                "pose": {"x_m": pose.x_m, "y_m": pose.y_m},
+            },
+        )
+
+    clamped_x = min(max(pose.x_m, 0.0), ws.width_m)
+    clamped_y = min(max(pose.y_m, 0.0), ws.height_m)
+    current = Pose2D(x_m=clamped_x, y_m=clamped_y, heading_deg=pose.heading_deg)
 
     try:
         if request.task == "navigate":
