@@ -146,6 +146,43 @@ class AutoDetectShelvesResponse(BaseModel):
     persisted: bool
 
 
+# --- HSV color picker / custom ranges --------------------------------------
+
+class HsvSampleRequest(BaseModel):
+    pixel_u: int
+    pixel_v: int
+    patch_size: int = 5
+
+
+class HsvBand(BaseModel):
+    h_min: int
+    s_min: int
+    v_min: int
+    h_max: int
+    s_max: int
+    v_max: int
+
+
+class HsvSampleResponse(BaseModel):
+    median_h: int
+    median_s: int
+    median_v: int
+    bands: list[HsvBand]
+
+
+class CustomHsvUpsertRequest(BaseModel):
+    bands: list[HsvBand]
+
+
+class CustomHsvEntry(BaseModel):
+    name: str
+    bands: list[HsvBand]
+
+
+class CustomHsvListResponse(BaseModel):
+    entries: list[CustomHsvEntry]
+
+
 # --- Errors -----------------------------------------------------------------
 
 class ErrorResponse(BaseModel):

@@ -5,6 +5,7 @@ import {
 } from "../lib/api";
 import type { CalibrationStatus } from "../lib/types";
 import ManualExtrinsicPanel from "./ManualExtrinsicPanel";
+import ColorPickerPanel from "./ColorPickerPanel";
 
 export default function CalibrationTab() {
   const [status, setStatus] = useState<CalibrationStatus | null>(null);
@@ -110,6 +111,8 @@ export default function CalibrationTab() {
       </div>
 
       <ManualExtrinsicPanel onCalibrated={refresh} />
+
+      <ColorPickerPanel />
 
       <div className="space-y-2 rounded border border-amber-500/30 bg-amber-500/5 p-4">
         <label className="block font-semibold text-amber-300">

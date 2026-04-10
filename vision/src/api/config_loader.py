@@ -1,7 +1,9 @@
 """Load and validate settings.yaml and shelves.json."""
 from pathlib import Path
 import json
+import numpy as np
 import yaml
+from vision.src.detection.hsv_ranges import HsvRange
 from vision.src.models import (
     Settings, WorkspaceConfig, RobotConfig, RobotMarkers, CameraConfig,
     PlannerConfig, Shelf, ApproachPoint,
@@ -64,6 +66,47 @@ def load_shelves(path: Path) -> list[Shelf]:
         except (KeyError, TypeError, ValueError) as e:
             raise ConfigError(f"Malformed shelf entry: {e}") from e
     return shelves
+
+
+def load_custom_hsv(path: Path) -> dict[str, list[HsvRange]]:
+    """Load user-saved HSV ranges from custom_hsv.yaml.
+
+    Missing file -> empty dict. Each entry is a list of 6-tuples
+    (H_min, S_min, V_min, H_max, S_max, V_max).
+    """
+    if not path.exists():
+        return {}
+    with path.open("r") as f:
+        data = yaml.safe_load(f) or {}
+    raw = data.get("ranges") or {}
+    out: dict[str, list[HsvRange]] = {}
+    for name, entries in raw.items():
+        ranges: list[HsvRange] = []
+        for entry in entries:
+            if len(entry) != 6:
+                raise ConfigError(
+                    f"custom_hsv.yaml entry '{name}' must have 6 values, got {len(entry)}"
+                )
+            lo = np.array(entry[:3], dtype=np.uint8)
+            hi = np.array(entry[3:], dtype=np.uint8)
+            ranges.append((lo, hi))
+        out[str(name).lower()] = ranges
+    return out
+
+
+def save_custom_hsv(custom: dict[str, list[HsvRange]], path: Path) -> None:
+    data = {
+        "ranges": {
+            name: [
+                [int(x) for x in list(lo) + list(hi)]
+                for lo, hi in ranges
+            ]
+            for name, ranges in custom.items()
+        }
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        yaml.safe_dump(data, f, sort_keys=True)
 
 
 def save_shelves(shelves: list[Shelf], path: Path) -> None:

@@ -100,6 +100,45 @@ export async function detectDebug(): Promise<{
   return request("/detect/debug", { method: "POST" });
 }
 
+export type HsvBand = {
+  h_min: number; s_min: number; v_min: number;
+  h_max: number; s_max: number; v_max: number;
+};
+
+export type HsvSampleResult = {
+  median_h: number;
+  median_s: number;
+  median_v: number;
+  bands: HsvBand[];
+};
+
+export async function sampleHsv(pixelU: number, pixelV: number, patchSize = 5): Promise<HsvSampleResult> {
+  return request("/hsv/sample", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ pixel_u: pixelU, pixel_v: pixelV, patch_size: patchSize }),
+  });
+}
+
+export type CustomHsvEntry = { name: string; bands: HsvBand[] };
+
+export async function listCustomHsvRanges(): Promise<{ entries: CustomHsvEntry[] }> {
+  return request("/hsv/custom_ranges");
+}
+
+export async function upsertCustomHsvRange(name: string, bands: HsvBand[]): Promise<CustomHsvEntry> {
+  return request(`/hsv/custom_ranges/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bands }),
+  });
+}
+
+export async function deleteCustomHsvRange(name: string): Promise<{ ok: boolean; removed: string }> {
+  return request(`/hsv/custom_ranges/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+
 export type AutoDetectedShelf = {
   id: string;
   pixel_cx: number;

@@ -110,6 +110,7 @@ def client(tmp_config, synthetic_intrinsics, synthetic_extrinsics):
     paths.shelves = tmp_config / "shelves.json"
     paths.intrinsics = tmp_config / "camera_intrinsics.yaml"
     paths.extrinsics = tmp_config / "camera_extrinsics.yaml"
+    paths.custom_hsv = tmp_config / "custom_hsv.yaml"
     save_intrinsics(synthetic_intrinsics, paths.intrinsics)
     save_extrinsics(synthetic_extrinsics, paths.extrinsics)
     set_state(paths, camera)

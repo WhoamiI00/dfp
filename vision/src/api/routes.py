@@ -12,9 +12,12 @@ from vision.src.api.schemas import (
     PlanRequest, PlanResponse, WaypointSchema, Pose2DSchema, PlanMetrics,
     CameraMode,
     AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
+    HsvSampleRequest, HsvSampleResponse, HsvBand,
+    CustomHsvUpsertRequest, CustomHsvEntry, CustomHsvListResponse,
 )
 from vision.src.api.config_loader import (
     load_settings, load_shelves, save_shelves, ConfigError,
+    load_custom_hsv, save_custom_hsv,
 )
 from vision.src.api.camera import Camera, CameraError, SwitchableCamera
 from vision.src.calibration.intrinsic import (
@@ -28,7 +31,9 @@ from vision.src.calibration.synthetic import (
 )
 from vision.src.detection.robot import detect_robot, mask_for_ranges, largest_blob
 from vision.src.detection.shelves import detect_shelf_candidates
-from vision.src.detection.hsv_ranges import get_ranges, MIN_MARKER_AREA_PX
+from vision.src.detection.hsv_ranges import (
+    HsvRange, get_ranges, MIN_MARKER_AREA_PX, sample_hsv_range_from_pixel,
+)
 from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
 from vision.src.rendering.overlay import draw_overlay
@@ -44,6 +49,7 @@ class Paths:
     shelves: Path
     intrinsics: Path
     extrinsics: Path
+    custom_hsv: Path
 
 
 # Camera singleton is injected from server.py
@@ -56,6 +62,7 @@ def set_state(paths: Paths, camera: Camera) -> None:
     Paths.shelves = paths.shelves
     Paths.intrinsics = paths.intrinsics
     Paths.extrinsics = paths.extrinsics
+    Paths.custom_hsv = paths.custom_hsv
     _camera = camera
 
 
@@ -97,6 +104,44 @@ def _capture_frame() -> np.ndarray:
             status_code=503,
             detail={"error": "camera_unavailable", "message": str(e)},
         )
+
+
+def _resolve_color(name: str) -> list[HsvRange]:
+    """Look up an HSV range by colour name, checking user-saved custom
+    colours first (from custom_hsv.yaml) then falling back to the
+    built-in NAMED_HSV_RANGES in hsv_ranges.py."""
+    key = name.strip().lower()
+    try:
+        custom = load_custom_hsv(Paths.custom_hsv) if Paths.custom_hsv else {}
+    except ConfigError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "custom_hsv_config_error", "message": str(e)},
+        )
+    if key in custom:
+        return custom[key]
+    try:
+        return get_ranges(name)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_marker_color", "message": str(e)},
+        )
+
+
+def _band_from_range(rng: HsvRange) -> HsvBand:
+    lo, hi = rng
+    return HsvBand(
+        h_min=int(lo[0]), s_min=int(lo[1]), v_min=int(lo[2]),
+        h_max=int(hi[0]), s_max=int(hi[1]), v_max=int(hi[2]),
+    )
+
+
+def _range_from_band(band: HsvBand) -> HsvRange:
+    return (
+        np.array([band.h_min, band.s_min, band.v_min], dtype=np.uint8),
+        np.array([band.h_max, band.s_max, band.v_max], dtype=np.uint8),
+    )
 
 
 def _shelf_to_schema(s: Shelf) -> ShelfSchema:
@@ -216,13 +261,7 @@ def auto_detect_shelves(request: AutoDetectShelvesRequest):
     settings = load_settings(Paths.settings)
     frame = _capture_frame()
 
-    try:
-        marker_ranges = get_ranges(request.marker_color)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "unknown_marker_color", "message": str(e)},
-        )
+    marker_ranges = _resolve_color(request.marker_color)
 
     candidates = detect_shelf_candidates(
         frame,
@@ -289,6 +328,97 @@ def auto_detect_shelves(request: AutoDetectShelvesRequest):
         annotated_image_base64=_encode_image(annotated),
         persisted=request.persist,
     )
+
+
+# --- HSV color picker / custom ranges --------------------------------------
+
+@router.post("/hsv/sample", response_model=HsvSampleResponse)
+def hsv_sample(request: HsvSampleRequest):
+    """Sample the current camera frame at (pixel_u, pixel_v) and return
+    the median HSV plus a suggested forgiving range. Used by the Calibration
+    tab's color picker to build a tolerant marker range from a single click.
+    """
+    frame = _capture_frame()
+    try:
+        ranges, median = sample_hsv_range_from_pixel(
+            frame,
+            pixel_uv=(request.pixel_u, request.pixel_v),
+            patch_size=max(1, request.patch_size),
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_pixel", "message": str(e)},
+        )
+    return HsvSampleResponse(
+        median_h=median[0],
+        median_s=median[1],
+        median_v=median[2],
+        bands=[_band_from_range(r) for r in ranges],
+    )
+
+
+@router.get("/hsv/custom_ranges", response_model=CustomHsvListResponse)
+def list_custom_hsv_ranges():
+    try:
+        custom = load_custom_hsv(Paths.custom_hsv) if Paths.custom_hsv else {}
+    except ConfigError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "custom_hsv_config_error", "message": str(e)},
+        )
+    return CustomHsvListResponse(
+        entries=[
+            CustomHsvEntry(name=name, bands=[_band_from_range(r) for r in ranges])
+            for name, ranges in sorted(custom.items())
+        ]
+    )
+
+
+@router.put("/hsv/custom_ranges/{name}", response_model=CustomHsvEntry)
+def upsert_custom_hsv_range(name: str, request: CustomHsvUpsertRequest):
+    key = name.strip().lower()
+    if not key or not key.replace("_", "").isalnum():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_color_name",
+                "message": "Color names must be non-empty alphanumeric (underscores allowed).",
+            },
+        )
+    if not request.bands:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "empty_bands", "message": "At least one HSV band required."},
+        )
+
+    custom = load_custom_hsv(Paths.custom_hsv) if Paths.custom_hsv.exists() else {}
+    custom[key] = [_range_from_band(b) for b in request.bands]
+    save_custom_hsv(custom, Paths.custom_hsv)
+
+    return CustomHsvEntry(
+        name=key,
+        bands=[_band_from_range(r) for r in custom[key]],
+    )
+
+
+@router.delete("/hsv/custom_ranges/{name}")
+def delete_custom_hsv_range(name: str):
+    key = name.strip().lower()
+    if not Paths.custom_hsv.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "custom_hsv_not_found"},
+        )
+    custom = load_custom_hsv(Paths.custom_hsv)
+    if key not in custom:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "custom_hsv_not_found", "name": key},
+        )
+    del custom[key]
+    save_custom_hsv(custom, Paths.custom_hsv)
+    return {"ok": True, "removed": key}
 
 
 # --- Calibration ------------------------------------------------------------
@@ -473,8 +603,8 @@ def detect_debug():
     HSV ranges or diagnosing 'markers not found' failures."""
     settings = load_settings(Paths.settings)
     frame = _capture_frame()
-    front_ranges = get_ranges(settings.robot.markers.front_color)
-    back_ranges = get_ranges(settings.robot.markers.back_color)
+    front_ranges = _resolve_color(settings.robot.markers.front_color)
+    back_ranges = _resolve_color(settings.robot.markers.back_color)
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     front_mask = mask_for_ranges(hsv, front_ranges)
@@ -521,8 +651,8 @@ def detect():
 
     pose = detect_robot(
         frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-        front_ranges=get_ranges(settings.robot.markers.front_color),
-        back_ranges=get_ranges(settings.robot.markers.back_color),
+        front_ranges=_resolve_color(settings.robot.markers.front_color),
+        back_ranges=_resolve_color(settings.robot.markers.back_color),
     )
     annotated = draw_overlay(
         frame, shelves, pose, waypoints=[], intrinsics=intrinsics,
@@ -559,8 +689,8 @@ def plan(request: PlanRequest):
 
     pose = detect_robot(
         frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-        front_ranges=get_ranges(settings.robot.markers.front_color),
-        back_ranges=get_ranges(settings.robot.markers.back_color),
+        front_ranges=_resolve_color(settings.robot.markers.front_color),
+        back_ranges=_resolve_color(settings.robot.markers.back_color),
     )
     if pose is None:
         raise HTTPException(

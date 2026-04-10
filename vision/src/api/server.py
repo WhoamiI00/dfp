@@ -17,6 +17,7 @@ def build_paths() -> Paths:
     p.shelves = CONFIG_DIR / "shelves.json"
     p.intrinsics = CONFIG_DIR / "camera_intrinsics.yaml"
     p.extrinsics = CONFIG_DIR / "camera_extrinsics.yaml"
+    p.custom_hsv = CONFIG_DIR / "custom_hsv.yaml"
     return p
 
 
