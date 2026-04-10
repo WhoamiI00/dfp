@@ -27,3 +27,13 @@ Server starts on `http://localhost:8100`. Open the Next.js dev server (`cd ../we
 ```bash
 pytest vision/tests -v
 ```
+
+## Known limitations
+
+Phase 1 prototype notes:
+
+- **HSV ranges are untuned.** The red/green marker thresholds in `src/detection/hsv_ranges.py` are starting values only. Tune them once for your specific lighting before relying on detection.
+- **Robot must be in frame for `/api/plan`.** If the robot markers are not detected, the plan endpoint returns HTTP 422 `{error: "robot_not_detected"}`. Capture the robot somewhere visible first.
+- **Snapshot workflow only.** Each capture/detect/plan cycle is triggered manually from the web UI. Continuous video tracking is out of scope for phase 1.
+- **Grab and place are stubs.** The waypoint sequence includes `grab` and `place` actions, but the robot controller that consumes them is still in development. The web UI's Execute button is intentionally disabled.
+- **No frontend tests yet.** The `/vision` route is smoke-tested by clicking through; Playwright or similar can be added later.
