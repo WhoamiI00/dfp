@@ -8,7 +8,7 @@
       "length_m": 1.0,
       "rotation_deg": 0,
       "approach_point": {
-        "x_m": 1.0,
+        "x_m": 1.125,
         "y_m": 1.25,
         "heading_deg": 180
       }
@@ -21,7 +21,7 @@
       "length_m": 1.0,
       "rotation_deg": 0,
       "approach_point": {
-        "x_m": 1.5,
+        "x_m": 1.375,
         "y_m": 1.25,
         "heading_deg": 0
       }
