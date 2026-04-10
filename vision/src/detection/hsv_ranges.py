@@ -29,7 +29,7 @@ BLUE_HSV_RANGES: list[HsvRange] = [
 ]
 
 YELLOW_HSV_RANGES: list[HsvRange] = [
-    (np.array([20, 100, 100]), np.array([35, 255, 255])),
+    (np.array([15, 50, 180]), np.array([35, 255, 255])),
 ]
 
 

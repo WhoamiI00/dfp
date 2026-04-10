@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { getShelves, saveShelves, getSettings } from "../lib/api";
+import { getShelves, saveShelves, getSettings, autoDetectShelves } from "../lib/api";
 import type { Shelf, Settings } from "../lib/types";
 
 const PX_PER_M = 200;
@@ -19,6 +19,10 @@ export default function LayoutEditorTab() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState("");
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoMarkerColor, setAutoMarkerColor] = useState("yellow");
+  const [autoMaxCount, setAutoMaxCount] = useState(3);
+  const [autoPreviewB64, setAutoPreviewB64] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -70,6 +74,30 @@ export default function LayoutEditorTab() {
     } catch (e) { setMessage(`Save failed: ${e}`); }
   };
 
+  const runAutoDetect = async () => {
+    setAutoBusy(true);
+    setMessage("");
+    setAutoPreviewB64(null);
+    try {
+      const result = await autoDetectShelves({
+        marker_color: autoMarkerColor,
+        max_count: autoMaxCount,
+        persist: true,
+      });
+      setAutoPreviewB64(result.annotated_image_base64);
+      const refreshed = await getShelves();
+      setShelves(refreshed.shelves);
+      setDirty(false);
+      setMessage(
+        `Detected ${result.shelves.length} shelf marker${result.shelves.length === 1 ? "" : "s"} — saved.`,
+      );
+    } catch (e) {
+      setMessage(`Auto-detect failed: ${e}`);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
+
   if (!settings) return <div>Loading…</div>;
 
   const W = settings.workspace.width_m * PX_PER_M;
@@ -78,6 +106,42 @@ export default function LayoutEditorTab() {
   return (
     <div className="flex gap-6">
       <div>
+        <div className="flex flex-wrap items-end gap-2 mb-2 rounded border border-amber-500/30 bg-amber-500/5 p-2">
+          <label className="text-xs text-white/70">
+            <div>Marker color</div>
+            <input
+              type="text"
+              value={autoMarkerColor}
+              onChange={e => setAutoMarkerColor(e.target.value)}
+              className="w-24 bg-black border border-white/20 px-2 py-1 text-sm"
+              disabled={autoBusy}
+            />
+          </label>
+          <label className="text-xs text-white/70">
+            <div>Max count</div>
+            <input
+              type="number" min={1} max={16}
+              value={autoMaxCount}
+              onChange={e => setAutoMaxCount(parseInt(e.target.value || "1", 10))}
+              className="w-16 bg-black border border-white/20 px-2 py-1 text-sm"
+              disabled={autoBusy}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={runAutoDetect}
+            disabled={autoBusy}
+            className="px-3 py-1 bg-amber-600 text-white rounded disabled:opacity-50"
+          >
+            {autoBusy ? "Detecting…" : "Auto-detect shelves from image"}
+          </button>
+          <div className="text-xs text-white/50 basis-full">
+            Scans the current camera frame for coloured marker stickers,
+            projects their centroids through the current calibration, and
+            overwrites the shelves list. Requires intrinsic + extrinsic
+            calibration to be set.
+          </div>
+        </div>
         <div className="flex gap-2 mb-2">
           <button onClick={addShelf} className="px-3 py-1 bg-blue-600 rounded">Add Shelf</button>
           <button onClick={deleteSelected} disabled={!selected} className="px-3 py-1 bg-red-600 rounded disabled:opacity-50">Delete</button>
@@ -161,7 +225,17 @@ export default function LayoutEditorTab() {
         </div>
       )}
 
-      {message && <div className="ml-auto text-sm text-white/80">{message}</div>}
+      <div className="ml-auto flex flex-col gap-2 max-w-xs">
+        {message && <div className="text-sm text-white/80">{message}</div>}
+        {autoPreviewB64 && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={`data:image/png;base64,${autoPreviewB64}`}
+            alt="auto-detect preview"
+            className="max-w-full border border-amber-500/40 rounded"
+          />
+        )}
+      </div>
     </div>
   );
 }

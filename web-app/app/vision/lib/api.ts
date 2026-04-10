@@ -100,6 +100,35 @@ export async function detectDebug(): Promise<{
   return request("/detect/debug", { method: "POST" });
 }
 
+export type AutoDetectedShelf = {
+  id: string;
+  pixel_cx: number;
+  pixel_cy: number;
+  pixel_area: number;
+  world_x_m: number;
+  world_y_m: number;
+};
+
+export async function autoDetectShelves(body?: {
+  marker_color?: string;
+  max_count?: number;
+  id_prefix?: string;
+  approach_offset_m?: number;
+  shelf_width_m?: number;
+  shelf_length_m?: number;
+  persist?: boolean;
+}): Promise<{
+  shelves: AutoDetectedShelf[];
+  annotated_image_base64: string;
+  persisted: boolean;
+}> {
+  return request("/layout/auto_detect", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
 export async function plan(body: { task: "navigate" | "pick_place"; source_shelf_id?: string; destination_shelf_id: string }): Promise<{
   waypoints: Waypoint[];
   annotated_image_base64: string;

@@ -11,6 +11,7 @@ from vision.src.api.schemas import (
     CaptureResponse, DetectResponse, DetectDebugResponse, RobotPoseSchema,
     PlanRequest, PlanResponse, WaypointSchema, Pose2DSchema, PlanMetrics,
     CameraMode,
+    AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
 )
 from vision.src.api.config_loader import (
     load_settings, load_shelves, save_shelves, ConfigError,
@@ -26,6 +27,7 @@ from vision.src.calibration.synthetic import (
     build_synthetic_calibration, SYNTHETIC_CAMERA_HEIGHT_M,
 )
 from vision.src.detection.robot import detect_robot, mask_for_ranges, largest_blob
+from vision.src.detection.shelves import detect_shelf_candidates
 from vision.src.detection.hsv_ranges import get_ranges, MIN_MARKER_AREA_PX
 from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
@@ -196,6 +198,97 @@ def put_shelves(payload: ShelvesPayload):
     shelves = [_schema_to_shelf(s) for s in payload.shelves]
     save_shelves(shelves, Paths.shelves)
     return {"ok": True}
+
+
+@router.post("/layout/auto_detect", response_model=AutoDetectShelvesResponse)
+def auto_detect_shelves(request: AutoDetectShelvesRequest):
+    """Detect coloured shelf markers in the current frame, project them to
+    world coordinates, and optionally persist as shelves.json.
+
+    The detector takes the top `max_count` blobs by area and sorts them
+    left-to-right. Shelf IDs are generated as `<id_prefix>A`, `<id_prefix>B`,
+    ... Approach points are placed `approach_offset_m` metres below each
+    shelf (toward the robot) with heading 90 degrees — good enough for a
+    top-row layout; override with PUT /shelves for anything fancier.
+    """
+    intrinsics = _require_intrinsics()
+    extrinsics = _require_extrinsics()
+    settings = load_settings(Paths.settings)
+    frame = _capture_frame()
+
+    try:
+        marker_ranges = get_ranges(request.marker_color)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_marker_color", "message": str(e)},
+        )
+
+    candidates = detect_shelf_candidates(
+        frame,
+        marker_ranges=marker_ranges,
+        intrinsics=intrinsics,
+        extrinsics=extrinsics,
+        max_count=request.max_count,
+    )
+    if not candidates:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "no_shelf_markers_found",
+                "message": (
+                    f"No {request.marker_color} blobs above the minimum area "
+                    "threshold were found in the current frame. Check lighting, "
+                    "marker colour, or widen the HSV range in hsv_ranges.py."
+                ),
+            },
+        )
+
+    ws = settings.workspace
+    shelves: list[Shelf] = []
+    for i, cand in enumerate(candidates):
+        shelf_id = f"{request.id_prefix}{chr(ord('A') + i)}"
+        approach_y = max(0.0, min(ws.height_m, cand.world_y_m - request.approach_offset_m))
+        shelves.append(
+            Shelf(
+                id=shelf_id,
+                x_m=cand.world_x_m,
+                y_m=cand.world_y_m,
+                width_m=request.shelf_width_m,
+                length_m=request.shelf_length_m,
+                rotation_deg=0.0,
+                approach_point=ApproachPoint(
+                    x_m=cand.world_x_m,
+                    y_m=approach_y,
+                    heading_deg=90.0,
+                ),
+            )
+        )
+
+    if request.persist:
+        save_shelves(shelves, Paths.shelves)
+
+    annotated = draw_overlay(
+        frame, shelves, robot_pose=None, waypoints=[],
+        intrinsics=intrinsics, extrinsics=extrinsics,
+        travel_height_m=settings.robot.travel_height_m,
+    )
+
+    return AutoDetectShelvesResponse(
+        shelves=[
+            AutoDetectedShelf(
+                id=shelves[i].id,
+                pixel_cx=cand.pixel_cx,
+                pixel_cy=cand.pixel_cy,
+                pixel_area=cand.pixel_area,
+                world_x_m=cand.world_x_m,
+                world_y_m=cand.world_y_m,
+            )
+            for i, cand in enumerate(candidates)
+        ],
+        annotated_image_base64=_encode_image(annotated),
+        persisted=request.persist,
+    )
 
 
 # --- Calibration ------------------------------------------------------------

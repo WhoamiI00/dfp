@@ -119,6 +119,33 @@ class PlanResponse(BaseModel):
     metrics: PlanMetrics
 
 
+# --- Layout auto-detect -----------------------------------------------------
+
+class AutoDetectShelvesRequest(BaseModel):
+    marker_color: str = "yellow"
+    max_count: int = 3
+    id_prefix: str = "shelf_"
+    approach_offset_m: float = 0.75
+    shelf_width_m: float = 0.4
+    shelf_length_m: float = 0.3
+    persist: bool = True
+
+
+class AutoDetectedShelf(BaseModel):
+    id: str
+    pixel_cx: float
+    pixel_cy: float
+    pixel_area: int
+    world_x_m: float
+    world_y_m: float
+
+
+class AutoDetectShelvesResponse(BaseModel):
+    shelves: list[AutoDetectedShelf]
+    annotated_image_base64: str
+    persisted: bool
+
+
 # --- Errors -----------------------------------------------------------------
 
 class ErrorResponse(BaseModel):
