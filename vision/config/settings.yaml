@@ -1,0 +1,15 @@
+workspace:
+  width_m: 2.5
+  height_m: 2.5
+  cell_size_m: 0.25
+robot:
+  footprint_m: [0.5, 0.5]
+  travel_height_m: 0.30
+  markers:
+    front_color: red
+    back_color: green
+camera:
+  source: 0
+  resolution: [1280, 720]
+planner:
+  obstacle_inflation_m: 0.10
