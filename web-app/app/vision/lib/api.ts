@@ -44,12 +44,60 @@ export async function calibrateExtrinsic(): Promise<{ calibration_error_px: numb
   return request("/calibration/extrinsic", { method: "POST" });
 }
 
+export async function calibrateExtrinsicManual(
+  cornerPixels: [number, number][],
+): Promise<{ calibration_error_px: number }> {
+  return request("/calibration/extrinsic/manual", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ corner_pixels: cornerPixels }),
+  });
+}
+
+export async function calibrateSynthetic(): Promise<{
+  ok: boolean;
+  image_size: [number, number];
+  focal_length_px: number;
+  synthetic_camera_height_m: number;
+}> {
+  return request("/calibration/synthetic", { method: "POST" });
+}
+
 export async function capture(): Promise<{ image_base64: string }> {
   return request("/capture");
 }
 
+export type CameraMode = "live" | "test_image";
+
+export async function getCameraMode(): Promise<{ mode: CameraMode }> {
+  return request("/camera/mode");
+}
+
+export async function setCameraImage(file: File): Promise<{ mode: CameraMode }> {
+  const form = new FormData();
+  form.append("file", file);
+  return request("/camera/image", { method: "POST", body: form });
+}
+
+export async function clearCameraImage(): Promise<{ mode: CameraMode }> {
+  return request("/camera/image", { method: "DELETE" });
+}
+
 export async function detect(): Promise<{ robot_pose: RobotPose | null; reason: string | null; annotated_image_base64: string }> {
   return request("/detect", { method: "POST" });
+}
+
+export async function detectDebug(): Promise<{
+  front_color_name: string;
+  back_color_name: string;
+  min_marker_area_px: number;
+  front_largest_area_px: number;
+  back_largest_area_px: number;
+  front_centroid_px: [number, number] | null;
+  back_centroid_px: [number, number] | null;
+  mask_overlay_base64: string;
+}> {
+  return request("/detect/debug", { method: "POST" });
 }
 
 export async function plan(body: { task: "navigate" | "pick_place"; source_shelf_id?: string; destination_shelf_id: string }): Promise<{

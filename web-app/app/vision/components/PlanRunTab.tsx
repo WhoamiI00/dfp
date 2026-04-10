@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { getShelves, capture, detect, plan } from "../lib/api";
+import { getShelves, capture, detect, detectDebug, plan } from "../lib/api";
 import type { Shelf, Waypoint, PlanMetrics } from "../lib/types";
 
 type TaskType = "navigate" | "pick_place";
@@ -20,12 +20,19 @@ export default function PlanRunTab() {
       try {
         const data = await getShelves();
         setShelves(data.shelves);
-        if (data.shelves.length >= 1) setDst(data.shelves[0].id);
-        if (data.shelves.length >= 2) setSrc(data.shelves[0].id);
+        if (data.shelves.length >= 1) setSrc(data.shelves[0].id);
         if (data.shelves.length >= 2) setDst(data.shelves[1].id);
       } catch (e) { setMessage(String(e)); }
     })();
   }, []);
+
+  // Keep source and destination different whenever the lists change.
+  useEffect(() => {
+    if (src === dst && shelves.length >= 2) {
+      const other = shelves.find(s => s.id !== src);
+      if (other) setDst(other.id);
+    }
+  }, [src, dst, shelves]);
 
   const handleCapture = async () => {
     try {
@@ -41,6 +48,21 @@ export default function PlanRunTab() {
       const r = await detect();
       setImageB64(r.annotated_image_base64);
       setMessage(r.robot_pose ? `Robot at (${r.robot_pose.x_m.toFixed(2)}, ${r.robot_pose.y_m.toFixed(2)}) @ ${r.robot_pose.heading_deg.toFixed(0)} deg` : "Markers not found");
+    } catch (e) { setMessage(String(e)); }
+  };
+
+  const handleDetectDebug = async () => {
+    try {
+      const r = await detectDebug();
+      setImageB64(r.mask_overlay_base64);
+      setWaypoints([]);
+      setMetrics(null);
+      const frontOk = r.front_largest_area_px >= r.min_marker_area_px;
+      const backOk = r.back_largest_area_px >= r.min_marker_area_px;
+      setMessage(
+        `Front (${r.front_color_name}): largest blob ${r.front_largest_area_px}px ${frontOk ? "✓" : "✗ (need ≥" + r.min_marker_area_px + ")"}. ` +
+        `Back (${r.back_color_name}): largest blob ${r.back_largest_area_px}px ${backOk ? "✓" : "✗ (need ≥" + r.min_marker_area_px + ")"}.`,
+      );
     } catch (e) { setMessage(String(e)); }
   };
 
@@ -72,23 +94,24 @@ export default function PlanRunTab() {
           <label className="block">
             <span className="text-white/60 text-sm">Source shelf</span>
             <select value={src} onChange={e => setSrc(e.target.value)} className="w-full bg-black border border-white/20 px-2 py-1">
-              {shelves.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
+              {shelves.filter(s => s.id !== dst).map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
             </select>
           </label>
         )}
         <label className="block">
           <span className="text-white/60 text-sm">Destination shelf</span>
           <select value={dst} onChange={e => setDst(e.target.value)} className="w-full bg-black border border-white/20 px-2 py-1">
-            {shelves.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
+            {shelves.filter(s => taskType !== "pick_place" || s.id !== src).map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
           </select>
         </label>
       </div>
 
       <div className="col-span-6 space-y-2">
         <div className="flex gap-2">
-          <button onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded">Capture</button>
-          <button onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded">Detect</button>
-          <button onClick={handlePlan} className="px-3 py-1 bg-green-600 rounded">Plan</button>
+          <button type="button" onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded">Capture</button>
+          <button type="button" onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded">Detect</button>
+          <button type="button" onClick={handleDetectDebug} className="px-3 py-1 bg-amber-600 rounded" title="Show raw color masks for tuning">Debug masks</button>
+          <button type="button" onClick={handlePlan} className="px-3 py-1 bg-green-600 rounded">Plan</button>
         </div>
         {imageB64 && (
           <img src={`data:image/png;base64,${imageB64}`} alt="vision feed" className="w-full border border-white/20" />
@@ -114,7 +137,7 @@ export default function PlanRunTab() {
             <div>Est. time: {metrics.estimated_time_s.toFixed(1)} s</div>
           </div>
         )}
-        <button disabled className="px-3 py-1 bg-gray-700 rounded opacity-50" title="Hardware integration pending">
+        <button type="button" disabled className="px-3 py-1 bg-gray-700 rounded opacity-50" title="Hardware integration pending">
           Execute
         </button>
       </div>

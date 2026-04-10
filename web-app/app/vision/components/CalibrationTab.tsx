@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
 import {
-  getCalibrationStatus, calibrateIntrinsic, calibrateExtrinsic,
+  getCalibrationStatus, calibrateIntrinsic, calibrateExtrinsic, calibrateSynthetic,
 } from "../lib/api";
 import type { CalibrationStatus } from "../lib/types";
+import ManualExtrinsicPanel from "./ManualExtrinsicPanel";
 
 export default function CalibrationTab() {
   const [status, setStatus] = useState<CalibrationStatus | null>(null);
@@ -45,6 +46,22 @@ export default function CalibrationTab() {
     }
   };
 
+  const handleSynthetic = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const r = await calibrateSynthetic();
+      setMessage(
+        `Synthetic calibration injected — image ${r.image_size[0]}x${r.image_size[1]}, f=${r.focal_length_px.toFixed(0)}px, camera height ${r.synthetic_camera_height_m}m`,
+      );
+      await refresh();
+    } catch (e) {
+      setMessage(`Synthetic calibration failed: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex gap-4">
@@ -72,6 +89,8 @@ export default function CalibrationTab() {
           disabled={busy}
           onChange={(e) => handleIntrinsic(e.target.files)}
           className="block"
+          title="Chessboard images"
+          aria-label="Chessboard images"
         />
       </div>
 
@@ -81,11 +100,34 @@ export default function CalibrationTab() {
           Place 4 ArUco markers (DICT_4X4_50, IDs 0-3) at workspace corners, then click:
         </p>
         <button
+          type="button"
           disabled={busy || !status?.intrinsic}
           onClick={handleExtrinsic}
           className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
         >
           Run extrinsic calibration
+        </button>
+      </div>
+
+      <ManualExtrinsicPanel onCalibrated={refresh} />
+
+      <div className="space-y-2 rounded border border-amber-500/30 bg-amber-500/5 p-4">
+        <label className="block font-semibold text-amber-300">
+          Synthetic calibration (dev only)
+        </label>
+        <p className="text-sm text-white/70">
+          Injects intrinsics and extrinsics for a top-down overhead camera
+          using the current frame&apos;s dimensions. Use this with an
+          uploaded top-down test image to skip real calibration. Not
+          accurate for corner-mounted cameras or real hardware.
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={handleSynthetic}
+          className="px-4 py-2 bg-amber-600 text-white rounded disabled:opacity-50"
+        >
+          Inject synthetic calibration
         </button>
       </div>
 
