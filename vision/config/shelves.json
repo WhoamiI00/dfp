@@ -1,0 +1,30 @@
+{
+  "shelves": [
+    {
+      "id": "shelf_A",
+      "x_m": 0.5,
+      "y_m": 1.25,
+      "width_m": 0.5,
+      "length_m": 1.0,
+      "rotation_deg": 0,
+      "approach_point": {
+        "x_m": 1.125,
+        "y_m": 1.25,
+        "heading_deg": 180
+      }
+    },
+    {
+      "id": "shelf_B",
+      "x_m": 2.0,
+      "y_m": 1.25,
+      "width_m": 0.5,
+      "length_m": 1.0,
+      "rotation_deg": 0,
+      "approach_point": {
+        "x_m": 1.375,
+        "y_m": 1.25,
+        "heading_deg": 0
+      }
+    }
+  ]
+}
