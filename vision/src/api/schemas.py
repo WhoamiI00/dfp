@@ -41,6 +41,18 @@ class ExtrinsicResult(BaseModel):
     calibration_error_px: float
 
 
+class ManualExtrinsicRequest(BaseModel):
+    # Four (u, v) pixel coordinates of the workspace corners, in this order:
+    # (0, 0), (width, 0), (width, height), (0, height).
+    corner_pixels: list[tuple[float, float]]
+
+
+# --- Camera mode ------------------------------------------------------------
+
+class CameraMode(BaseModel):
+    mode: Literal["live", "test_image"]
+
+
 # --- Capture / detect -------------------------------------------------------
 
 class CaptureResponse(BaseModel):
@@ -59,6 +71,17 @@ class DetectResponse(BaseModel):
     robot_pose: RobotPoseSchema | None
     reason: str | None = None
     annotated_image_base64: str
+
+
+class DetectDebugResponse(BaseModel):
+    front_color_name: str
+    back_color_name: str
+    min_marker_area_px: int
+    front_largest_area_px: int
+    back_largest_area_px: int
+    front_centroid_px: tuple[float, float] | None
+    back_centroid_px: tuple[float, float] | None
+    mask_overlay_base64: str
 
 
 # --- Planning ---------------------------------------------------------------

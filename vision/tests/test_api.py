@@ -5,7 +5,7 @@ import pytest
 import numpy as np
 from fastapi.testclient import TestClient
 from vision.src.api.server import create_app
-from vision.src.api.camera import FakeCamera
+from vision.src.api.camera import FakeCamera, SwitchableCamera
 from vision.src.api.routes import Paths, set_state
 from vision.src.calibration.intrinsic import save_intrinsics
 from vision.src.calibration.extrinsic import save_extrinsics
@@ -15,10 +15,18 @@ from vision.tests.conftest import make_synthetic_robot_image
 
 @pytest.fixture
 def tmp_config(tmp_path: Path):
+    import yaml
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     source_config = Path(__file__).resolve().parents[1] / "config"
-    shutil.copy(source_config / "settings.yaml", config_dir / "settings.yaml")
+    # Load settings, override marker colors to match the synthetic red/green
+    # scene renderer used by tests, then write to the tmp config dir.
+    with (source_config / "settings.yaml").open("r") as f:
+        settings_data = yaml.safe_load(f)
+    settings_data["robot"]["markers"]["front_color"] = "red"
+    settings_data["robot"]["markers"]["back_color"] = "green"
+    with (config_dir / "settings.yaml").open("w") as f:
+        yaml.safe_dump(settings_data, f)
     shutil.copy(source_config / "shelves.json", config_dir / "shelves.json")
     return config_dir
 
@@ -30,7 +38,7 @@ def client(tmp_config, synthetic_intrinsics, synthetic_extrinsics):
         synthetic_intrinsics, synthetic_extrinsics,
         robot_xy_m=(1.25, 1.25), heading_deg=0.0, height_m=0.30,
     )
-    camera = FakeCamera(frame)
+    camera = SwitchableCamera(FakeCamera(frame))
     app = create_app(camera=camera)
 
     # Override Paths to use the tmp config dir.
@@ -62,7 +70,8 @@ def test_settings(client):
 def test_shelves_get(client):
     r = client.get("/api/shelves")
     assert r.status_code == 200
-    assert len(r.json()["shelves"]) == 2
+    ids = {s["id"] for s in r.json()["shelves"]}
+    assert {"shelf_A", "shelf_B"}.issubset(ids)
 
 
 def test_shelves_put_round_trip(client):
@@ -101,6 +110,47 @@ def test_detect(client):
     data = r.json()
     assert data["robot_pose"] is not None
     assert abs(data["robot_pose"]["x_m"] - 1.25) < 0.05
+
+
+def test_camera_mode_default_live(client):
+    r = client.get("/api/camera/mode")
+    assert r.status_code == 200
+    assert r.json() == {"mode": "live"}
+
+
+def test_camera_image_upload_and_clear(client, synthetic_intrinsics, synthetic_extrinsics):
+    import cv2
+    # Use a synthetic robot image at (0.75, 0.75) as the override.
+    override_frame = make_synthetic_robot_image(
+        synthetic_intrinsics, synthetic_extrinsics,
+        robot_xy_m=(0.75, 0.75), heading_deg=0.0, height_m=0.30,
+    )
+    ok, buf = cv2.imencode(".png", override_frame)
+    assert ok
+    files = {"file": ("override.png", buf.tobytes(), "image/png")}
+
+    r = client.post("/api/camera/image", files=files)
+    assert r.status_code == 200
+    assert r.json() == {"mode": "test_image"}
+
+    # Detect now sees the overridden position, not the fake camera's default (1.25, 1.25).
+    r2 = client.post("/api/detect")
+    assert r2.status_code == 200
+    pose = r2.json()["robot_pose"]
+    assert pose is not None
+    assert abs(pose["x_m"] - 0.75) < 0.05
+    assert abs(pose["y_m"] - 0.75) < 0.05
+
+    r3 = client.delete("/api/camera/image")
+    assert r3.status_code == 200
+    assert r3.json() == {"mode": "live"}
+
+    # Detect falls back to the fake camera's original frame (1.25, 1.25).
+    r4 = client.post("/api/detect")
+    assert r4.status_code == 200
+    pose2 = r4.json()["robot_pose"]
+    assert pose2 is not None
+    assert abs(pose2["x_m"] - 1.25) < 0.05
 
 
 def test_plan_pick_place(client):

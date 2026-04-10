@@ -6,8 +6,8 @@ robot:
   footprint_m: [0.5, 0.5]
   travel_height_m: 0.30
   markers:
-    front_color: red
-    back_color: green
+    front_color: pink
+    back_color: blue
 camera:
   source: 0
   resolution: [1280, 720]

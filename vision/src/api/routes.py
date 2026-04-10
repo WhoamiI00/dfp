@@ -7,21 +7,26 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from vision.src.api.schemas import (
     ShelvesPayload, ShelfSchema, ApproachPointSchema,
-    CalibrationStatus, IntrinsicResult, ExtrinsicResult,
-    CaptureResponse, DetectResponse, RobotPoseSchema,
+    CalibrationStatus, IntrinsicResult, ExtrinsicResult, ManualExtrinsicRequest,
+    CaptureResponse, DetectResponse, DetectDebugResponse, RobotPoseSchema,
     PlanRequest, PlanResponse, WaypointSchema, Pose2DSchema, PlanMetrics,
+    CameraMode,
 )
 from vision.src.api.config_loader import (
     load_settings, load_shelves, save_shelves, ConfigError,
 )
-from vision.src.api.camera import Camera, CameraError
+from vision.src.api.camera import Camera, CameraError, SwitchableCamera
 from vision.src.calibration.intrinsic import (
     calibrate_from_images, save_intrinsics, load_intrinsics, IntrinsicCalibrationError,
 )
 from vision.src.calibration.extrinsic import (
     calibrate_from_frame, save_extrinsics, load_extrinsics, ExtrinsicCalibrationError,
 )
-from vision.src.detection.robot import detect_robot
+from vision.src.calibration.synthetic import (
+    build_synthetic_calibration, SYNTHETIC_CAMERA_HEIGHT_M,
+)
+from vision.src.detection.robot import detect_robot, mask_for_ranges, largest_blob
+from vision.src.detection.hsv_ranges import get_ranges, MIN_MARKER_AREA_PX
 from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
 from vision.src.rendering.overlay import draw_overlay
@@ -223,6 +228,83 @@ async def calibration_intrinsic(files: list[UploadFile] = File(...)):
     )
 
 
+@router.post("/calibration/extrinsic/manual", response_model=ExtrinsicResult)
+def calibration_extrinsic_manual(request: ManualExtrinsicRequest):
+    """Compute extrinsics from 4 manually clicked workspace corners."""
+    intrinsics = _require_intrinsics()
+    if len(request.corner_pixels) != 4:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "need_exactly_4_corners"},
+        )
+    settings = load_settings(Paths.settings)
+    ws_w = settings.workspace.width_m
+    ws_h = settings.workspace.height_m
+
+    object_points = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [ws_w, 0.0, 0.0],
+            [ws_w, ws_h, 0.0],
+            [0.0, ws_h, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    image_points = np.array(request.corner_pixels, dtype=np.float64)
+
+    ok, rvec, tvec = cv2.solvePnP(
+        object_points,
+        image_points,
+        intrinsics.camera_matrix,
+        intrinsics.dist_coeffs,
+        flags=cv2.SOLVEPNP_IPPE,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "solvepnp_failed"},
+        )
+
+    projected, _ = cv2.projectPoints(
+        object_points, rvec, tvec, intrinsics.camera_matrix, intrinsics.dist_coeffs
+    )
+    error = float(np.linalg.norm(projected.reshape(-1, 2) - image_points, axis=1).mean())
+
+    markers = [
+        ExtrinsicMarker(id=0, workspace_xy_m=(0.0, 0.0)),
+        ExtrinsicMarker(id=1, workspace_xy_m=(ws_w, 0.0)),
+        ExtrinsicMarker(id=2, workspace_xy_m=(ws_w, ws_h)),
+        ExtrinsicMarker(id=3, workspace_xy_m=(0.0, ws_h)),
+    ]
+    extrinsics = Extrinsics(
+        rvec=rvec.flatten(),
+        tvec=tvec.flatten(),
+        floor_reference_markers=markers,
+        calibration_error_px=error,
+    )
+    save_extrinsics(extrinsics, Paths.extrinsics)
+    return ExtrinsicResult(calibration_error_px=error)
+
+
+@router.post("/calibration/synthetic")
+def calibration_synthetic():
+    """Dev-only: inject synthetic intrinsics + extrinsics for a top-down
+    overhead view of the workspace, using the current camera frame's
+    dimensions. Lets the full pipeline run without real calibration.
+    """
+    settings = load_settings(Paths.settings)
+    frame = _capture_frame()
+    intrinsics, extrinsics = build_synthetic_calibration(frame, settings)
+    save_intrinsics(intrinsics, Paths.intrinsics)
+    save_extrinsics(extrinsics, Paths.extrinsics)
+    return {
+        "ok": True,
+        "image_size": list(intrinsics.image_size),
+        "focal_length_px": float(intrinsics.camera_matrix[0, 0]),
+        "synthetic_camera_height_m": SYNTHETIC_CAMERA_HEIGHT_M,
+    }
+
+
 @router.post("/calibration/extrinsic", response_model=ExtrinsicResult)
 def calibration_extrinsic():
     intrinsics = _require_intrinsics()
@@ -244,12 +326,96 @@ def calibration_extrinsic():
     return ExtrinsicResult(calibration_error_px=extrinsics.calibration_error_px)
 
 
+# --- Camera mode (test image override) -------------------------------------
+
+@router.get("/camera/mode", response_model=CameraMode)
+def camera_mode():
+    if isinstance(_camera, SwitchableCamera):
+        return CameraMode(mode=_camera.mode)
+    return CameraMode(mode="live")
+
+
+@router.post("/camera/image", response_model=CameraMode)
+async def camera_set_image(file: UploadFile = File(...)):
+    if not isinstance(_camera, SwitchableCamera):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "camera_not_switchable"},
+        )
+    data = await file.read()
+    arr = np.frombuffer(data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_image"},
+        )
+    _camera.set_image(img)
+    return CameraMode(mode=_camera.mode)
+
+
+@router.delete("/camera/image", response_model=CameraMode)
+def camera_clear_image():
+    if not isinstance(_camera, SwitchableCamera):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "camera_not_switchable"},
+        )
+    _camera.clear_image()
+    return CameraMode(mode=_camera.mode)
+
+
 # --- Capture / detect -------------------------------------------------------
 
 @router.get("/capture", response_model=CaptureResponse)
 def capture():
     frame = _capture_frame()
     return CaptureResponse(image_base64=_encode_image(frame), timestamp=time.time())
+
+
+@router.post("/detect/debug", response_model=DetectDebugResponse)
+def detect_debug():
+    """Run the color masks on the current frame and return an annotated
+    overlay showing what the detector actually picks up. Used for tuning
+    HSV ranges or diagnosing 'markers not found' failures."""
+    settings = load_settings(Paths.settings)
+    frame = _capture_frame()
+    front_ranges = get_ranges(settings.robot.markers.front_color)
+    back_ranges = get_ranges(settings.robot.markers.back_color)
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    front_mask = mask_for_ranges(hsv, front_ranges)
+    back_mask = mask_for_ranges(hsv, back_ranges)
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    overlay[front_mask > 0] = (180, 80, 255)   # magenta for front mask
+    overlay[back_mask > 0] = (255, 150, 40)    # blue for back mask
+
+    front_blob = largest_blob(front_mask)
+    back_blob = largest_blob(back_mask)
+
+    # Draw a crosshair at each centroid if found.
+    for blob, color in ((front_blob, (0, 0, 255)), (back_blob, (255, 0, 0))):
+        if blob is not None:
+            cx, cy, _ = blob
+            cv2.drawMarker(overlay, (int(cx), int(cy)), color,
+                           markerType=cv2.MARKER_CROSS, markerSize=30, thickness=2)
+
+    return DetectDebugResponse(
+        front_color_name=settings.robot.markers.front_color,
+        back_color_name=settings.robot.markers.back_color,
+        min_marker_area_px=MIN_MARKER_AREA_PX,
+        front_largest_area_px=(front_blob[2] if front_blob else 0),
+        back_largest_area_px=(back_blob[2] if back_blob else 0),
+        front_centroid_px=(
+            (float(front_blob[0]), float(front_blob[1])) if front_blob else None
+        ),
+        back_centroid_px=(
+            (float(back_blob[0]), float(back_blob[1])) if back_blob else None
+        ),
+        mask_overlay_base64=_encode_image(overlay),
+    )
 
 
 @router.post("/detect", response_model=DetectResponse)
@@ -260,7 +426,11 @@ def detect():
     shelves = load_shelves(Paths.shelves)
     frame = _capture_frame()
 
-    pose = detect_robot(frame, intrinsics, extrinsics, settings.robot.travel_height_m)
+    pose = detect_robot(
+        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
+        front_ranges=get_ranges(settings.robot.markers.front_color),
+        back_ranges=get_ranges(settings.robot.markers.back_color),
+    )
     annotated = draw_overlay(
         frame, shelves, pose, waypoints=[], intrinsics=intrinsics,
         extrinsics=extrinsics, travel_height_m=settings.robot.travel_height_m,
@@ -294,7 +464,11 @@ def plan(request: PlanRequest):
     shelves = load_shelves(Paths.shelves)
     frame = _capture_frame()
 
-    pose = detect_robot(frame, intrinsics, extrinsics, settings.robot.travel_height_m)
+    pose = detect_robot(
+        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
+        front_ranges=get_ranges(settings.robot.markers.front_color),
+        back_ranges=get_ranges(settings.robot.markers.back_color),
+    )
     if pose is None:
         raise HTTPException(
             status_code=422,

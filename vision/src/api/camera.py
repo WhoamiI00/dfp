@@ -48,3 +48,28 @@ class FakeCamera(Camera):
         if img is None:
             raise CameraError(f"Failed to load fake camera image: {path}")
         return cls(img)
+
+
+class SwitchableCamera(Camera):
+    """Delegates to a fallback camera, but can be overridden with a still image
+    at runtime. Lets the UI temporarily feed a local file instead of the live
+    camera for testing."""
+
+    def __init__(self, fallback: Camera):
+        self._fallback = fallback
+        self._override: np.ndarray | None = None
+
+    def set_image(self, image: np.ndarray) -> None:
+        self._override = image.copy()
+
+    def clear_image(self) -> None:
+        self._override = None
+
+    @property
+    def mode(self) -> str:
+        return "test_image" if self._override is not None else "live"
+
+    def capture(self) -> np.ndarray:
+        if self._override is not None:
+            return self._override.copy()
+        return self._fallback.capture()

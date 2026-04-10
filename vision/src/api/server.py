@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from vision.src.api.routes import router, set_state, Paths
-from vision.src.api.camera import OpenCVCamera
+from vision.src.api.camera import OpenCVCamera, SwitchableCamera
 from vision.src.api.config_loader import load_settings
 
 
@@ -39,6 +39,9 @@ def create_app(camera=None) -> FastAPI:
             source=settings.camera.source,
             resolution=tuple(settings.camera.resolution),
         )
+
+    if not isinstance(camera, SwitchableCamera):
+        camera = SwitchableCamera(camera)
 
     set_state(paths, camera)
     app.include_router(router)
