@@ -1,11 +1,11 @@
-"""A* pathfinding on a 2D occupancy grid (8-connected)."""
+"""A* pathfinding on a 2D occupancy grid (4- or 8-connected)."""
 import heapq
 import math
 import numpy as np
 from vision.src.planning.errors import NoPathError
 
 
-_NEIGHBORS = [
+_NEIGHBORS_8 = [
     (-1, -1, math.sqrt(2)),
     (-1, 0, 1.0),
     (-1, 1, math.sqrt(2)),
@@ -14,6 +14,13 @@ _NEIGHBORS = [
     (1, -1, math.sqrt(2)),
     (1, 0, 1.0),
     (1, 1, math.sqrt(2)),
+]
+
+_NEIGHBORS_4 = [
+    (-1, 0, 1.0),
+    (0, -1, 1.0),
+    (0, 1, 1.0),
+    (1, 0, 1.0),
 ]
 
 
@@ -25,6 +32,7 @@ def a_star(
     grid: np.ndarray,
     start: tuple[int, int],
     goal: tuple[int, int],
+    allow_diagonals: bool = True,
 ) -> list[tuple[int, int]]:
     """Return the shortest 8-connected path from `start` to `goal` as a list
     of (row, col) cells. Raises NoPathError if unreachable.
@@ -37,6 +45,7 @@ def a_star(
     if grid[goal] == 1:
         raise NoPathError(f"Goal cell {goal} is blocked")
 
+    neighbors = _NEIGHBORS_8 if allow_diagonals else _NEIGHBORS_4
     open_heap: list[tuple[float, tuple[int, int]]] = [(_heuristic(start, goal), start)]
     came_from: dict[tuple[int, int], tuple[int, int]] = {}
     g_score: dict[tuple[int, int], float] = {start: 0.0}
@@ -56,7 +65,7 @@ def a_star(
             return path
         closed.add(current)
 
-        for dr, dc, cost in _NEIGHBORS:
+        for dr, dc, cost in neighbors:
             nr, nc = current[0] + dr, current[1] + dc
             if not (0 <= nr < rows and 0 <= nc < cols):
                 continue

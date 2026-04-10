@@ -41,7 +41,9 @@ def plan_navigate_to(
         )
     start_cell = snapped_start
 
-    cell_path = a_star(grid, start_cell, goal_cell)
+    # 4-connected: the current robot can only do 90° in-place turns,
+    # so diagonal grid steps would produce un-executable headings.
+    cell_path = a_star(grid, start_cell, goal_cell, allow_diagonals=False)
     return decompose_to_waypoints(
         cell_path,
         start_heading_deg=current_pose.heading_deg,
