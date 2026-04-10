@@ -69,3 +69,29 @@ def project_world_to_pixel(
     u = intrinsics.camera_matrix[0, 0] * (cam[0] / cam[2]) + intrinsics.camera_matrix[0, 2]
     v = intrinsics.camera_matrix[1, 1] * (cam[1] / cam[2]) + intrinsics.camera_matrix[1, 2]
     return float(u), float(v)
+
+
+def make_synthetic_robot_image(
+    intrinsics,
+    extrinsics,
+    robot_xy_m: tuple[float, float],
+    heading_deg: float,
+    height_m: float,
+    image_size: tuple[int, int] = (1280, 720),
+) -> np.ndarray:
+    """Draw a synthetic scene with the two robot markers projected to pixel space."""
+    img = np.full((image_size[1], image_size[0], 3), 40, dtype=np.uint8)
+
+    marker_offset = 0.15  # 15 cm between red (front) and green (back)
+    rad = np.radians(heading_deg)
+    dx = np.cos(rad) * marker_offset / 2
+    dy = np.sin(rad) * marker_offset / 2
+    red_world = np.array([robot_xy_m[0] + dx, robot_xy_m[1] + dy, height_m])
+    green_world = np.array([robot_xy_m[0] - dx, robot_xy_m[1] - dy, height_m])
+
+    red_u, red_v = project_world_to_pixel(red_world, intrinsics, extrinsics)
+    green_u, green_v = project_world_to_pixel(green_world, intrinsics, extrinsics)
+
+    cv2.circle(img, (int(red_u), int(red_v)), 25, (0, 0, 255), -1)
+    cv2.circle(img, (int(green_u), int(green_v)), 25, (0, 255, 0), -1)
+    return img
