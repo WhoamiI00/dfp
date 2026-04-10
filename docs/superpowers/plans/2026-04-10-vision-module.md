@@ -1269,6 +1269,20 @@ def test_grid_inflation_widens_obstacle():
     assert inflated[5, 4] == 1
 
 
+def test_grid_small_inflation_rounds_up_not_down():
+    """0.10 m inflation at 0.25 m cells should ceil to 1 cell, not floor to 0."""
+    inflated = build_occupancy_grid(
+        [Shelf(
+            id="s", x_m=1.25, y_m=1.25, width_m=0.25, length_m=0.25, rotation_deg=0,
+            approach_point=ApproachPoint(x_m=0.5, y_m=1.25, heading_deg=0),
+        )],
+        make_settings(cell_size=0.25, inflation=0.10),
+    )
+    # The shelf cell is (5, 5) and must have at least one ring of inflation.
+    assert inflated[5, 5] == 1
+    assert inflated[4, 5] == 1 or inflated[6, 5] == 1
+
+
 def test_grid_raises_on_blocked_approach_point():
     settings = make_settings(cell_size=0.25, inflation=0.25)
     shelf = Shelf(
@@ -1312,13 +1326,19 @@ from vision.src.planning.errors import ApproachPointBlockedError
 
 
 def world_to_cell(xy_m: tuple[float, float], settings: Settings) -> tuple[int, int]:
-    """World (x, y) in meters → (row, col). Raises ValueError if out of bounds."""
+    """World (x, y) in meters → (row, col). Raises ValueError if out of bounds.
+
+    Points exactly on the far boundary are clamped to the last cell so that
+    detection noise at the workspace edge does not error out.
+    """
     x, y = xy_m
     ws = settings.workspace
-    if not (0 <= x < ws.width_m and 0 <= y < ws.height_m):
+    if not (0 <= x <= ws.width_m and 0 <= y <= ws.height_m):
         raise ValueError(f"Point ({x}, {y}) outside workspace")
-    col = int(x / ws.cell_size_m)
-    row = int(y / ws.cell_size_m)
+    cols = int(round(ws.width_m / ws.cell_size_m))
+    rows = int(round(ws.height_m / ws.cell_size_m))
+    col = min(int(x / ws.cell_size_m), cols - 1)
+    row = min(int(y / ws.cell_size_m), rows - 1)
     return row, col
 
 
@@ -1372,8 +1392,9 @@ def build_occupancy_grid(shelves: list[Shelf], settings: Settings) -> np.ndarray
     """Build an int8 occupancy grid from the shelf list.
 
     Grid cells are 0 for free, 1 for obstacle. Obstacles are shelves rasterized
-    into the grid and then inflated by planner.obstacle_inflation_m rounded to
-    the nearest cell.
+    into the grid and then inflated by planner.obstacle_inflation_m, rounded
+    up to the nearest whole cell so small safety margins never silently round
+    to zero.
     """
     ws = settings.workspace
     rows = int(round(ws.height_m / ws.cell_size_m))
@@ -1383,7 +1404,7 @@ def build_occupancy_grid(shelves: list[Shelf], settings: Settings) -> np.ndarray
     for shelf in shelves:
         _rasterize_shelf(shelf, grid, settings)
 
-    radius_cells = int(round(settings.planner.obstacle_inflation_m / ws.cell_size_m))
+    radius_cells = math.ceil(settings.planner.obstacle_inflation_m / ws.cell_size_m)
     inflated = _inflate(grid, radius_cells)
 
     for shelf in shelves:
@@ -3001,7 +3022,13 @@ export type PlanMetrics = {
 
 export type Settings = {
   workspace: { width_m: number; height_m: number; cell_size_m: number };
-  robot: { footprint_m: [number, number]; travel_height_m: number };
+  robot: {
+    footprint_m: [number, number];
+    travel_height_m: number;
+    markers: { front_color: string; back_color: string };
+  };
+  camera: { source: number | string; resolution: [number, number] };
+  planner: { obstacle_inflation_m: number };
 };
 
 export type ApiError = { error: string; message?: string; details?: unknown };
@@ -3623,6 +3650,21 @@ The spec-document-reviewer flagged these minor items as non-blocking. They are a
 3. **Y-axis convention** — workspace +Y points away from the bottom-left ArUco marker. Headings are counter-clockwise-positive from +X. Documented in Conventions.
 4. **`/api/detect` request body** — defined in `schemas.py` as an empty POST (no body required); the server captures a fresh frame internally.
 5. **Chessboard `9x6`** — clarified as **inner corner count** in Conventions and in `intrinsic.py::CHESSBOARD_INNER_CORNERS`.
+
+## Reference: advisory notes from the plan review
+
+The plan reviewer flagged these advisory items. Resolved directly in the plan:
+
+- **Silent zero inflation with default config.** Default `obstacle_inflation_m: 0.10` with `cell_size_m: 0.25` previously rounded to `0` cells. `build_occupancy_grid` now uses `math.ceil` so any non-zero inflation produces at least one cell of margin. Covered by `test_grid_small_inflation_rounds_up_not_down`.
+- **Boundary rejection in `world_to_cell`.** A robot pose exactly on the far workspace edge used to raise `ValueError`. `world_to_cell` now clamps to the last cell.
+- **`lib/types.ts::Settings` incomplete.** Now declares `camera` and `planner` in addition to `workspace` and `robot`.
+
+Left as known limitations (acceptable for phase 1):
+
+- Shelf validation happens per-request rather than at server startup or at PUT time. Malformed configs still surface as clean `412`/`422` errors; the spec's "refuse to start" behavior can be added later if it becomes friction.
+- `test_extrinsic.py` only covers save/load round-trip. A synthetic-ArUco test for `calibrate_from_frame` can be added later; for phase 1 the FastAPI integration test in `test_api.py` exercises the stored extrinsics path.
+- `routes.Paths` uses class-level attributes as a state container. Functional but fragile across concurrent tests. Can be moved to `app.state` during a later cleanup.
+- `make_settings` is imported from `test_grid.py` by `test_motion.py` and `test_task.py`. Minor coupling; moving it to `conftest.py` is a cleanup opportunity.
 
 ---
 
