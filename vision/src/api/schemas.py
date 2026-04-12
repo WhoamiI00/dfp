@@ -119,6 +119,36 @@ class PlanResponse(BaseModel):
     metrics: PlanMetrics
 
 
+# --- Execute (stream plan over Bluetooth) -----------------------------------
+
+class ExecuteRequest(BaseModel):
+    task: Literal["navigate", "pick_place"]
+    source_shelf_id: str | None = None
+    destination_shelf_id: str
+    port: str | None = None   # e.g. "COM6"; defaults to ROBOT_PORT env / COM6
+    baud: int | None = None   # defaults to ROBOT_BAUD env / 9600
+
+
+class ExecuteCommandLog(BaseModel):
+    cmd: str
+    reply: str
+    elapsed_ms: int
+
+
+class ExecuteResponse(BaseModel):
+    ok: bool
+    chars_sent: int
+    sequence: str
+    log: list[ExecuteCommandLog]
+    error: str | None = None
+
+
+class RobotSendRequest(BaseModel):
+    sequence: str            # one or more protocol chars, e.g. "F" or "FFLR"
+    port: str | None = None
+    baud: int | None = None
+
+
 # --- Layout auto-detect -----------------------------------------------------
 
 class AutoDetectShelvesRequest(BaseModel):

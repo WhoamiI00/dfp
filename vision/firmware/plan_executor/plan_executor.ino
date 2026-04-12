@@ -1,98 +1,99 @@
-// plan_executor.ino — receives single-char movement commands over HC-05
-// and drives a 4-direction L298N robot car. No precise angle support: only
-// 90° in-place turns and one-cell forward/backward steps.
+#include <EEPROM.h>
+
+#define IN1 22
+#define IN2 23
+#define IN3 24
+#define IN4 25
+
+// Defaults — may be overridden at boot by EEPROM-persisted values or at any
+// time over the USB Serial Monitor (see handleUsbLine below).
+unsigned long CELL_FORWARD_MS = 450;    // time for one 0.25 m cell
+unsigned long TURN_90_MS      = 2000;   // time for 90° spin
+unsigned long GRAB_PLACE_MS   = 2000;   // placeholder grab/place pause
+
+// ============== Runtime-tunable config (USB Serial Monitor, COM7) ==========
 //
-// Hardware:
-//   Arduino Mega 2560
-//   HC-05  TXD -> pin 19 (RX1) direct
-//          RXD -> pin 18 (TX1) via 1k+2k voltage divider
-//          VCC -> 5V, GND -> GND
-//   L298N  IN1 -> pin 22, IN2 -> pin 23  (motor A)
-//          IN3 -> pin 24, IN4 -> pin 25  (motor B)
+// No more re-flashing to tweak timing. Open the Arduino IDE's Serial Monitor
+// on COM7 (9600 baud, line ending: "Newline") and type:
 //
-// Protocol (single-char, '\n'/'\r' ignored):
-//   F   forward one cell                -> "OK\n"
-//   B   backward one cell               -> "OK\n"
-//   L   turn left  90° in place         -> "OK\n"
-//   R   turn right 90° in place         -> "OK\n"
-//   G   grab  (placeholder, 2 s pause)  -> "OK\n"
-//   P   place (placeholder, 2 s pause)  -> "OK\n"
-//   S   emergency stop                  -> "OK\n"
-//   ?   ping                            -> "PONG\n"
+//   F<ms>   set CELL_FORWARD_MS, e.g.  F500
+//   T<ms>   set TURN_90_MS,     e.g.  T1800
+//   G<ms>   set GRAB_PLACE_MS,  e.g.  G2000
+//   ?       print current values
+//   reset   restore compiled defaults
 //
-// All movements block until complete, then send "OK". The PC waits for OK
-// before sending the next char, so commands never queue inside the Mega.
-//
-// TUNING: adjust CELL_FORWARD_MS and TURN_90_MS for your motors. There is
-// no encoder, so distance/angle accuracy depends entirely on these constants
-// and a flat, consistent floor.
+// Values are written to EEPROM so they survive power cycles. The single-char
+// Bluetooth movement protocol on Serial1 is unchanged.
 
-const unsigned long CELL_FORWARD_MS = 1500;  // time to drive one 0.25 m cell
-const unsigned long TURN_90_MS      = 600;   // time to rotate 90° in place
-const unsigned long GRAB_PLACE_MS   = 2000;  // placeholder grab/place pause
+const uint16_t EEPROM_MAGIC = 0xA55A;
+const int EEPROM_BASE = 0;
 
-const int IN1 = 22;
-const int IN2 = 23;
-const int IN3 = 24;
-const int IN4 = 25;
+struct PersistedConfig {
+  uint16_t magic;
+  unsigned long cell_forward_ms;
+  unsigned long turn_90_ms;
+  unsigned long grab_place_ms;
+};
 
-void stopCar() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-}
-
-void driveForward() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-}
-
-void driveBackward() {
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-}
-
-void spinRight() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-}
-
-void spinLeft() {
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-}
-
-void timedMove(void (*motion)(), unsigned long ms) {
-  motion();
-  delay(ms);
-  stopCar();
-}
-
-void handle(char cmd) {
-  Serial.print("Received: "); Serial.println(cmd);
-
-  switch (cmd) {
-    case 'F': timedMove(driveForward,  CELL_FORWARD_MS); break;
-    case 'B': timedMove(driveBackward, CELL_FORWARD_MS); break;
-    case 'L': timedMove(spinLeft,      TURN_90_MS);      break;
-    case 'R': timedMove(spinRight,     TURN_90_MS);      break;
-    case 'G': stopCar(); delay(GRAB_PLACE_MS);           break;
-    case 'P': stopCar(); delay(GRAB_PLACE_MS);           break;
-    case 'S': stopCar();                                 break;
-    case '?': Serial1.println("PONG");                   return;
-    default:  Serial1.print("ERR "); Serial1.println(cmd); return;
+void loadConfig() {
+  PersistedConfig cfg;
+  EEPROM.get(EEPROM_BASE, cfg);
+  if (cfg.magic == EEPROM_MAGIC) {
+    CELL_FORWARD_MS = cfg.cell_forward_ms;
+    TURN_90_MS      = cfg.turn_90_ms;
+    GRAB_PLACE_MS   = cfg.grab_place_ms;
   }
-  Serial1.println("OK");
 }
+
+void saveConfig() {
+  PersistedConfig cfg = {EEPROM_MAGIC, CELL_FORWARD_MS, TURN_90_MS, GRAB_PLACE_MS};
+  EEPROM.put(EEPROM_BASE, cfg);
+}
+
+void printConfig() {
+  Serial.print("F="); Serial.print(CELL_FORWARD_MS);
+  Serial.print(" T="); Serial.print(TURN_90_MS);
+  Serial.print(" G="); Serial.println(GRAB_PLACE_MS);
+}
+
+String usbBuf;
+
+void handleUsbLine(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  if (line == "?") {
+    printConfig();
+    return;
+  }
+  if (line.equalsIgnoreCase("reset")) {
+    CELL_FORWARD_MS = 450;
+    TURN_90_MS      = 2000;
+    GRAB_PLACE_MS   = 2000;
+    saveConfig();
+    Serial.print("reset -> "); printConfig();
+    return;
+  }
+
+  char key = line.charAt(0);
+  unsigned long val = line.substring(1).toInt();
+  if (val == 0) {
+    Serial.print("?? "); Serial.println(line);
+    return;
+  }
+  switch (key) {
+    case 'F': case 'f': CELL_FORWARD_MS = val; break;
+    case 'T': case 't': TURN_90_MS      = val; break;
+    case 'G': case 'g': GRAB_PLACE_MS   = val; break;
+    default:
+      Serial.print("?? "); Serial.println(line);
+      return;
+  }
+  saveConfig();
+  printConfig();
+}
+
+// ============== Movement protocol on Serial1 (HC-05) ======================
 
 void setup() {
   pinMode(IN1, OUTPUT);
@@ -101,15 +102,55 @@ void setup() {
   pinMode(IN4, OUTPUT);
   stopCar();
 
-  Serial.begin(9600);   // USB debug
-  Serial1.begin(9600);  // HC-05
-  Serial.println("ready");
+  Serial.begin(9600);
+  Serial1.begin(9600);
+
+  loadConfig();
+  Serial.print("ready "); printConfig();
 }
 
 void loop() {
+  // --- USB config channel (non-blocking) ---
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (usbBuf.length() > 0) {
+        handleUsbLine(usbBuf);
+        usbBuf = "";
+      }
+    } else {
+      usbBuf += c;
+      if (usbBuf.length() > 32) usbBuf = "";  // overflow guard
+    }
+  }
+
+  // --- BT movement channel (single-char, same protocol as before) ---
   if (Serial1.available()) {
-    char c = Serial1.read();
-    if (c == '\n' || c == '\r' || c == ' ') return;
-    handle(c);
+    char cmd = Serial1.read();
+    if (cmd == '\n' || cmd == '\r' || cmd == ' ') return;
+    Serial.print("Received: "); Serial.println(cmd);
+
+    switch (cmd) {
+      // Double-swap preserved (wiring correction).
+      case 'F': moveBackward(); delay(CELL_FORWARD_MS); stopCar(); Serial1.println("OK"); break;
+      case 'B': moveForward();  delay(CELL_FORWARD_MS); stopCar(); Serial1.println("OK"); break;
+      case 'L': turnRight();    delay(TURN_90_MS);      stopCar(); Serial1.println("OK"); break;
+      case 'R': turnLeft();     delay(TURN_90_MS);      stopCar(); Serial1.println("OK"); break;
+
+      case 'G': stopCar(); delay(GRAB_PLACE_MS); Serial1.println("OK"); break;
+      case 'P': stopCar(); delay(GRAB_PLACE_MS); Serial1.println("OK"); break;
+      case 'S': stopCar();                       Serial1.println("OK"); break;
+      case '?':                                  Serial1.println("PONG"); break;
+
+      default:  Serial1.print("ERR "); Serial1.println(cmd); break;
+    }
   }
 }
+
+// ================= MOVEMENTS =================
+
+void moveForward()  { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  }
+void moveBackward() { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); }
+void turnRight()    { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  }
+void turnLeft()     { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); }
+void stopCar()      { digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);  digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);  }

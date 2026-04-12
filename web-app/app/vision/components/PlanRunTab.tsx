@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { getShelves, capture, detect, detectDebug, plan } from "../lib/api";
+import { getShelves, capture, detect, detectDebug, plan, executePlan, sendRobotCommand } from "../lib/api";
 import type { Shelf, Waypoint, PlanMetrics } from "../lib/types";
 
 type TaskType = "navigate" | "pick_place";
@@ -14,6 +14,7 @@ export default function PlanRunTab() {
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
   const [metrics, setMetrics] = useState<PlanMetrics | null>(null);
   const [message, setMessage] = useState("");
+  const [executing, setExecuting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -80,6 +81,42 @@ export default function PlanRunTab() {
     } catch (e) { setMessage(String(e)); }
   };
 
+  const handleExecute = async () => {
+    if (!dst) return;
+    setExecuting(true);
+    setMessage("Executing… robot is moving, do not interrupt.");
+    try {
+      const r = await executePlan({
+        task: taskType,
+        source_shelf_id: taskType === "pick_place" ? src : undefined,
+        destination_shelf_id: dst,
+      });
+      if (r.ok) {
+        setMessage(`Executed ${r.chars_sent} commands (${r.sequence}).`);
+      } else {
+        setMessage(`Execution failed after ${r.chars_sent} commands: ${r.error ?? "unknown error"}`);
+      }
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  const handleManual = async (cmd: "F" | "B" | "L" | "R" | "S") => {
+    if (executing) return;
+    setExecuting(true);
+    setMessage(`Sending ${cmd}…`);
+    try {
+      const r = await sendRobotCommand(cmd);
+      setMessage(r.ok ? `OK (${cmd})` : `Failed: ${r.error ?? "unknown error"}`);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setExecuting(false);
+    }
+  };
+
   return (
     <div className="grid grid-cols-12 gap-4">
       <div className="col-span-3 space-y-3">
@@ -137,9 +174,60 @@ export default function PlanRunTab() {
             <div>Est. time: {metrics.estimated_time_s.toFixed(1)} s</div>
           </div>
         )}
-        <button type="button" disabled className="px-3 py-1 bg-gray-700 rounded opacity-50" title="Hardware integration pending">
-          Execute
+        <button
+          type="button"
+          onClick={handleExecute}
+          disabled={executing || !dst || (taskType === "pick_place" && !src)}
+          className="w-full px-3 py-2 bg-red-600 rounded disabled:bg-gray-700 disabled:opacity-50"
+          title="Re-plan from a fresh camera frame and stream the sequence to the robot over Bluetooth"
+        >
+          {executing ? "Executing…" : "Execute on Robot"}
         </button>
+
+        <div className="pt-3 mt-3 border-t border-white/10">
+          <div className="text-xs text-white/50 mb-2">Manual control</div>
+          <div className="grid grid-cols-3 gap-1 max-w-40 mx-auto">
+            <div />
+            <button
+              type="button"
+              onClick={() => handleManual("F")}
+              disabled={executing}
+              className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
+              title="Forward one cell"
+            >▲</button>
+            <div />
+            <button
+              type="button"
+              onClick={() => handleManual("L")}
+              disabled={executing}
+              className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
+              title="Turn left 90°"
+            >◀</button>
+            <button
+              type="button"
+              onClick={() => handleManual("S")}
+              disabled={executing}
+              className="px-3 py-2 bg-gray-600 rounded disabled:opacity-40"
+              title="Stop"
+            >■</button>
+            <button
+              type="button"
+              onClick={() => handleManual("R")}
+              disabled={executing}
+              className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
+              title="Turn right 90°"
+            >▶</button>
+            <div />
+            <button
+              type="button"
+              onClick={() => handleManual("B")}
+              disabled={executing}
+              className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
+              title="Backward one cell"
+            >▼</button>
+            <div />
+          </div>
+        </div>
       </div>
     </div>
   );

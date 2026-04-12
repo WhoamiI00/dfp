@@ -179,3 +179,39 @@ export async function plan(body: { task: "navigate" | "pick_place"; source_shelf
     body: JSON.stringify(body),
   });
 }
+
+export type ExecuteCommandLog = { cmd: string; reply: string; elapsed_ms: number };
+
+export async function executePlan(body: {
+  task: "navigate" | "pick_place";
+  source_shelf_id?: string;
+  destination_shelf_id: string;
+  port?: string;
+  baud?: number;
+}): Promise<{
+  ok: boolean;
+  chars_sent: number;
+  sequence: string;
+  log: ExecuteCommandLog[];
+  error: string | null;
+}> {
+  return request("/execute", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function sendRobotCommand(sequence: string): Promise<{
+  ok: boolean;
+  chars_sent: number;
+  sequence: string;
+  log: ExecuteCommandLog[];
+  error: string | null;
+}> {
+  return request("/robot/send", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sequence }),
+  });
+}

@@ -10,6 +10,7 @@ from vision.src.api.schemas import (
     CalibrationStatus, IntrinsicResult, ExtrinsicResult, ManualExtrinsicRequest,
     CaptureResponse, DetectResponse, DetectDebugResponse, RobotPoseSchema,
     PlanRequest, PlanResponse, WaypointSchema, Pose2DSchema, PlanMetrics,
+    ExecuteRequest, ExecuteResponse, ExecuteCommandLog, RobotSendRequest,
     CameraMode,
     AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
     HsvSampleRequest, HsvSampleResponse, HsvBand,
@@ -37,6 +38,8 @@ from vision.src.detection.hsv_ranges import (
 from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
 from vision.src.rendering.overlay import draw_overlay
+from vision.src.robot.protocol import plan_to_chars
+from vision.src.robot.link import send_sequence, DEFAULT_PORT, DEFAULT_BAUD
 from vision.src.models import (
     Shelf, ApproachPoint, Extrinsics, ExtrinsicMarker, Pose2D,
     TurnWaypoint, DriveWaypoint, GrabWaypoint, PlaceWaypoint, ArriveWaypoint,
@@ -287,7 +290,21 @@ def auto_detect_shelves(request: AutoDetectShelvesRequest):
     shelves: list[Shelf] = []
     for i, cand in enumerate(candidates):
         shelf_id = f"{request.id_prefix}{chr(ord('A') + i)}"
-        approach_y = max(0.0, min(ws.height_m, cand.world_y_m - request.approach_offset_m))
+
+        # Pick the side of the shelf (north vs south) that has room for the
+        # approach point. Whichever side of the shelf has more free workspace
+        # is chosen; the approach point is placed `approach_offset_m` into
+        # that free region and the heading is set so "drive forward" moves
+        # the robot toward the shelf.
+        space_south = cand.world_y_m                     # room below shelf
+        space_north = ws.height_m - cand.world_y_m       # room above shelf
+        if space_north >= space_south:
+            approach_y = min(ws.height_m, cand.world_y_m + request.approach_offset_m)
+            heading = 270.0  # -Y: facing the shelf from the north side
+        else:
+            approach_y = max(0.0, cand.world_y_m - request.approach_offset_m)
+            heading = 90.0   # +Y: facing the shelf from the south side
+
         shelves.append(
             Shelf(
                 id=shelf_id,
@@ -299,7 +316,7 @@ def auto_detect_shelves(request: AutoDetectShelvesRequest):
                 approach_point=ApproachPoint(
                     x_m=cand.world_x_m,
                     y_m=approach_y,
-                    heading_deg=90.0,
+                    heading_deg=heading,
                 ),
             )
         )
@@ -758,4 +775,106 @@ def plan(request: PlanRequest):
         waypoints=[_waypoint_to_schema(w) for w in waypoints],
         annotated_image_base64=_encode_image(annotated),
         metrics=_compute_metrics(waypoints),
+    )
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+def execute(request: ExecuteRequest):
+    """Re-plan from the current camera frame, translate the waypoints into the
+    single-char robot protocol, and stream them over HC-05 Bluetooth.
+
+    Re-planning (rather than accepting a pre-computed waypoint list from the
+    client) means detection runs against a fresh frame right before motion,
+    so stale poses from an earlier Plan click don't cause the robot to start
+    from the wrong place.
+
+    Blocks for the full motion duration — a typical 15-char plan takes
+    20-25 s — and returns a per-command log when done.
+    """
+    intrinsics = _require_intrinsics()
+    extrinsics = _require_extrinsics()
+    settings = load_settings(Paths.settings)
+    shelves = load_shelves(Paths.shelves)
+    frame = _capture_frame()
+
+    pose = detect_robot(
+        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
+        front_ranges=_resolve_color(settings.robot.markers.front_color),
+        back_ranges=_resolve_color(settings.robot.markers.back_color),
+    )
+    if pose is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "robot_not_detected"},
+        )
+
+    ws = settings.workspace
+    clamped_x = min(max(pose.x_m, 0.0), ws.width_m)
+    clamped_y = min(max(pose.y_m, 0.0), ws.height_m)
+    current = Pose2D(x_m=clamped_x, y_m=clamped_y, heading_deg=pose.heading_deg)
+
+    try:
+        if request.task == "navigate":
+            waypoints = plan_navigate_to(
+                shelves, request.destination_shelf_id, current, settings,
+            )
+        else:
+            if request.source_shelf_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "source_shelf_id_required"},
+                )
+            waypoints = plan_pick_and_place(
+                shelves, request.source_shelf_id, request.destination_shelf_id,
+                current, settings,
+            )
+    except (NoPathError, ApproachPointBlockedError) as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "no_path", "message": str(e)},
+        )
+
+    sequence = plan_to_chars(waypoints, ws.cell_size_m)
+    result = send_sequence(
+        sequence,
+        port=request.port or DEFAULT_PORT,
+        baud=request.baud or DEFAULT_BAUD,
+    )
+    return ExecuteResponse(
+        ok=result.ok,
+        chars_sent=result.chars_sent,
+        sequence=sequence,
+        log=[
+            ExecuteCommandLog(cmd=e.cmd, reply=e.reply, elapsed_ms=e.elapsed_ms)
+            for e in result.log
+        ],
+        error=result.error,
+    )
+
+
+@router.post("/robot/send", response_model=ExecuteResponse)
+def robot_send(request: RobotSendRequest):
+    """Send one or more protocol chars directly to the robot, bypassing the
+    planner. Used by the manual-control buttons in the web UI and by any
+    low-level debugging / motor calibration flow.
+
+    The firmware protocol chars are: F (forward one cell), B (backward),
+    L (turn left 90°), R (turn right 90°), G (grab placeholder),
+    P (place placeholder), S (stop), ? (ping → PONG).
+    """
+    sequence = request.sequence or ""
+    result = send_sequence(
+        sequence,
+        port=request.port or DEFAULT_PORT,
+        baud=request.baud or DEFAULT_BAUD,
+    )
+    return ExecuteResponse(
+        ok=result.ok,
+        chars_sent=result.chars_sent,
+        sequence=sequence,
+        log=[
+            ExecuteCommandLog(cmd=e.cmd, reply=e.reply, elapsed_ms=e.elapsed_ms)
+            for e in result.log
+        ],
+        error=result.error,
     )

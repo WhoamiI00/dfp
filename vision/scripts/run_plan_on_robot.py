@@ -43,7 +43,7 @@ CELL_SIZE_M = 0.25  # must match vision/config/settings.yaml workspace.cell_size
 
 
 def normalize_deg(d: float) -> float:
-    """Wrap an angle to (-180, 180]."""
+    """Wrap an angle to (-180, 180]. Mirrors vision.src.robot.protocol."""
     return ((d + 180.0) % 360.0) - 180.0
 
 
