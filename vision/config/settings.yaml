@@ -5,9 +5,22 @@ workspace:
 robot:
   footprint_m: [0.5, 0.5]
   travel_height_m: 0.30
+  # detector picks how the robot's pose is found in each frame:
+  #   aruco           -> ArUco tag only (most robust, no color tuning)
+  #   hsv             -> Front + back colour stickers (original behaviour)
+  #   aruco_then_hsv  -> Try ArUco first, fall back to HSV if the tag is hidden
+  detector: aruco_then_hsv
   markers:
+    # HSV fallback: front/back sticker colours. Used when detector is "hsv"
+    # or as fallback in "aruco_then_hsv". Colour names resolve via
+    # NAMED_HSV_RANGES + custom_hsv.yaml.
     front_color: pink
     back_color: blue
+    # ArUco config: print one DICT_4X4_50 tag with this ID and glue it flat
+    # on top of the robot. tag_size_m must match your printed size in metres.
+    # IDs 0-3 are reserved for the workspace corners (extrinsic calibration).
+    tag_id: 4
+    tag_size_m: 0.05
 camera:
   # Source can be:
   #   0, 1, 2, ...   -> local USB webcam index (try 1 if 0 is the laptop's built-in)

@@ -18,6 +18,10 @@ class WorkspaceConfig:
 class RobotMarkers:
     front_color: str
     back_color: str
+    # ArUco config — used when detector mode is "aruco" or "aruco_then_hsv".
+    # tag_id 4 reserved for the robot (extrinsic calibration uses 0-3).
+    tag_id: int = 4
+    tag_size_m: float = 0.05  # 50 mm — fits a small robot, prints on A4
 
 
 @dataclass(frozen=True)
@@ -25,6 +29,11 @@ class RobotConfig:
     footprint_m: tuple[float, float]
     travel_height_m: float
     markers: RobotMarkers
+    # "aruco" -> ArUco only, fail if missing.
+    # "hsv"   -> HSV only (the original behaviour).
+    # "aruco_then_hsv" -> try ArUco first, fall back to HSV. Default — most
+    #   robust to gradual sticker/tag transitions during dev.
+    detector: str = "aruco_then_hsv"
 
 
 @dataclass(frozen=True)

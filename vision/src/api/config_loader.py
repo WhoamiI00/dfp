@@ -24,14 +24,7 @@ def load_settings(path: Path) -> Settings:
                 height_m=float(data["workspace"]["height_m"]),
                 cell_size_m=float(data["workspace"]["cell_size_m"]),
             ),
-            robot=RobotConfig(
-                footprint_m=tuple(data["robot"]["footprint_m"]),
-                travel_height_m=float(data["robot"]["travel_height_m"]),
-                markers=RobotMarkers(
-                    front_color=str(data["robot"]["markers"]["front_color"]),
-                    back_color=str(data["robot"]["markers"]["back_color"]),
-                ),
-            ),
+            robot=_parse_robot(data["robot"]),
             camera=CameraConfig(
                 source=data["camera"]["source"],
                 resolution=tuple(data["camera"]["resolution"]),
@@ -43,6 +36,33 @@ def load_settings(path: Path) -> Settings:
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ConfigError(f"Malformed settings.yaml: {e}") from e
+
+
+_VALID_DETECTORS = {"aruco", "hsv", "aruco_then_hsv"}
+
+
+def _parse_robot(data: dict) -> RobotConfig:
+    """Robot config; markers + detector are optional with safe defaults so
+    older settings.yaml files keep loading without changes."""
+    markers_data = data.get("markers", {})
+    marker_defaults = RobotMarkers(front_color="red", back_color="green")
+    markers = RobotMarkers(
+        front_color=str(markers_data.get("front_color", marker_defaults.front_color)),
+        back_color=str(markers_data.get("back_color", marker_defaults.back_color)),
+        tag_id=int(markers_data.get("tag_id", marker_defaults.tag_id)),
+        tag_size_m=float(markers_data.get("tag_size_m", marker_defaults.tag_size_m)),
+    )
+    detector = str(data.get("detector", "aruco_then_hsv")).strip().lower()
+    if detector not in _VALID_DETECTORS:
+        raise ConfigError(
+            f"robot.detector must be one of {sorted(_VALID_DETECTORS)}, got {detector!r}"
+        )
+    return RobotConfig(
+        footprint_m=tuple(data["footprint_m"]),
+        travel_height_m=float(data["travel_height_m"]),
+        markers=markers,
+        detector=detector,
+    )
 
 
 def _parse_closed_loop(data: dict) -> ClosedLoopConfig:

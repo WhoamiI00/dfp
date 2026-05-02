@@ -12,7 +12,28 @@ from vision.src.detection.hsv_ranges import (
 )
 
 
+# CLAHE on the V channel before masking. Cheap, dramatically widens the
+# lighting band that a fixed HSV range survives — without it, a threshold
+# tuned in afternoon light breaks under evening LED. Hue and saturation are
+# left alone because changing them would shift the colour the threshold is
+# matching against, defeating the purpose.
+_CLAHE_CLIP_LIMIT = 2.0
+_CLAHE_TILE_GRID_SIZE = (8, 8)
+_clahe = cv2.createCLAHE(clipLimit=_CLAHE_CLIP_LIMIT, tileGridSize=_CLAHE_TILE_GRID_SIZE)
+
+
+def _normalize_lighting(hsv: np.ndarray) -> np.ndarray:
+    """Equalize the V channel of an HSV image so brightness variation across
+    the frame (overhead light gradient, shadow from the gantry, etc.) doesn't
+    push parts of a coloured marker outside the tuned range.
+    """
+    h, s, v = cv2.split(hsv)
+    v_eq = _clahe.apply(v)
+    return cv2.merge((h, s, v_eq))
+
+
 def mask_for_ranges(hsv: np.ndarray, ranges: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
+    hsv = _normalize_lighting(hsv)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in ranges:
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lo, hi))

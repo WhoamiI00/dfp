@@ -55,6 +55,39 @@ The camera handle is opened once and reused across captures (network MJPEG can t
 1. **Intrinsic** (one-time per camera): print a 9x6 chessboard, upload ~15 photos via the Calibration tab.
 2. **Extrinsic** (per-setup): print 4 ArUco markers (DICT_4X4_50, IDs 0-3), place at workspace corners, click "Run extrinsic calibration".
 
+## Robot detection
+
+The robot's pose is found via one of three modes, set by `robot.detector` in `config/settings.yaml`:
+
+| Mode | Behaviour |
+| --- | --- |
+| `aruco` | Single ArUco tag on top of robot. Most robust; ignores lighting completely. Fails cleanly if tag is hidden. |
+| `hsv` | Front and back colour stickers (the original behaviour). Tunable via the Calibration tab's colour picker. |
+| `aruco_then_hsv` | **Default.** Try ArUco first, fall back to HSV. Lets you transition incrementally. |
+
+### Setting up the ArUco robot tag
+
+1. Generate a printable PNG of tag ID 4 at the configured size:
+   ```bash
+   python -m vision.scripts.generate_tag
+   ```
+   Output goes to `vision/tag_4_50mm.png` by default. Override with `--id` / `--size-m` / `--out`.
+2. Print at 100 % scale on white paper. Verify the printed size with a ruler — the file targets the `tag_size_m` from settings (default 50 mm).
+3. Glue the tag flat on top of the robot, oriented so the **top edge of the tag points the way the robot drives forward** (the heading axis).
+4. Update `robot.markers.tag_size_m` if you printed a different size.
+5. The HSV stickers can stay on as a fallback — `aruco_then_hsv` will use ArUco when visible and silently fall back when not.
+
+ArUco IDs in use:
+- 0–3: workspace corners (extrinsic calibration)
+- 4: robot
+- 5+: free for future use (e.g. shelves)
+
+### Tuning the HSV fallback
+
+The mask pipeline now applies CLAHE (Contrast Limited Adaptive Histogram Equalization) on the V channel before thresholding. This widens the lighting band a fixed range survives — a threshold tuned in afternoon light no longer breaks under evening LED. You don't need to do anything to enable it; it's always on. Existing custom HSV ranges keep working and become more lighting-tolerant for free.
+
+The click-to-sample colour picker in the Calibration tab still works the same way: click the marker in the live frame, the backend returns a forgiving range that masks similar pixels.
+
 ## Test
 
 ```bash

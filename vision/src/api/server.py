@@ -1,10 +1,11 @@
 """FastAPI app entry point. Wires routes, paths, and camera."""
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from vision.src.api.routes import router, set_state, Paths
 from vision.src.api.camera import OpenCVCamera, SwitchableCamera
-from vision.src.api.config_loader import load_settings
+from vision.src.api.config_loader import load_settings, ConfigError
 
 
 VISION_ROOT = Path(__file__).resolve().parents[2]  # vision/
@@ -46,6 +47,17 @@ def create_app(camera=None) -> FastAPI:
 
     set_state(paths, camera)
     app.include_router(router)
+
+    # Translate ConfigError to a 500 with the same shape the rest of the API
+    # uses for error envelopes. Without this, malformed settings.yaml would
+    # bubble up as FastAPI's generic "Internal Server Error" with no detail.
+    @app.exception_handler(ConfigError)
+    async def _config_error_handler(_request: Request, exc: ConfigError) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": {"error": "config_error", "message": str(exc)}},
+        )
+
     return app
 
 

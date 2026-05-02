@@ -34,6 +34,7 @@ from vision.src.calibration.synthetic import (
     build_synthetic_calibration, SYNTHETIC_CAMERA_HEIGHT_M,
 )
 from vision.src.detection.robot import detect_robot, mask_for_ranges, largest_blob
+from vision.src.detection.aruco_robot import detect_robot_aruco
 from vision.src.detection.shelves import detect_shelf_candidates
 from vision.src.detection.hsv_ranges import (
     HsvRange, get_ranges, MIN_MARKER_AREA_PX, sample_hsv_range_from_pixel,
@@ -126,6 +127,31 @@ def _capture_frame(fresh: bool = True) -> np.ndarray:
             status_code=503,
             detail={"error": "camera_unavailable", "message": str(e)},
         )
+
+
+def _detect_robot_dispatch(frame, intrinsics, extrinsics, settings):
+    """Pick the detector based on settings.robot.detector and run it.
+
+    Centralised so /detect, /plan, /execute, /execute/stream all behave the
+    same way without duplicating the if/else. Returns a RobotPose or None.
+    """
+    mode = settings.robot.detector
+    travel_h = settings.robot.travel_height_m
+    tag_id = settings.robot.markers.tag_id
+
+    if mode in ("aruco", "aruco_then_hsv"):
+        pose = detect_robot_aruco(frame, intrinsics, extrinsics, travel_h, tag_id)
+        if pose is not None:
+            return pose
+        if mode == "aruco":
+            return None  # explicit aruco-only -> no fallback
+
+    # HSV path (mode == "hsv" or aruco_then_hsv with no tag found).
+    return detect_robot(
+        frame, intrinsics, extrinsics, travel_h,
+        front_ranges=_resolve_color(settings.robot.markers.front_color),
+        back_ranges=_resolve_color(settings.robot.markers.back_color),
+    )
 
 
 def _resolve_color(name: str) -> list[HsvRange]:
@@ -694,11 +720,7 @@ def detect():
     shelves = load_shelves(Paths.shelves)
     frame = _capture_frame()
 
-    pose = detect_robot(
-        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-        front_ranges=_resolve_color(settings.robot.markers.front_color),
-        back_ranges=_resolve_color(settings.robot.markers.back_color),
-    )
+    pose = _detect_robot_dispatch(frame, intrinsics, extrinsics, settings)
     annotated = draw_overlay(
         frame, shelves, pose, waypoints=[], intrinsics=intrinsics,
         extrinsics=extrinsics, travel_height_m=settings.robot.travel_height_m,
@@ -732,11 +754,7 @@ def plan(request: PlanRequest):
     shelves = load_shelves(Paths.shelves)
     frame = _capture_frame()
 
-    pose = detect_robot(
-        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-        front_ranges=_resolve_color(settings.robot.markers.front_color),
-        back_ranges=_resolve_color(settings.robot.markers.back_color),
-    )
+    pose = _detect_robot_dispatch(frame, intrinsics, extrinsics, settings)
     if pose is None:
         raise HTTPException(
             status_code=422,
@@ -838,11 +856,7 @@ def execute(request: ExecuteRequest):
     shelves = load_shelves(Paths.shelves)
     frame = _capture_frame()
 
-    pose = detect_robot(
-        frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-        front_ranges=_resolve_color(settings.robot.markers.front_color),
-        back_ranges=_resolve_color(settings.robot.markers.back_color),
-    )
+    pose = _detect_robot_dispatch(frame, intrinsics, extrinsics, settings)
     if pose is None:
         raise HTTPException(
             status_code=422,
@@ -979,8 +993,6 @@ def execute_stream(request: ExecuteStreamRequest):
             detail={"error": "unknown_shelf", "message": str(e)},
         )
 
-    front_ranges = _resolve_color(settings.robot.markers.front_color)
-    back_ranges = _resolve_color(settings.robot.markers.back_color)
     port = request.port or DEFAULT_PORT
     baud = request.baud or DEFAULT_BAUD
 
@@ -1026,10 +1038,7 @@ def execute_stream(request: ExecuteStreamRequest):
                     })
                     return
 
-                detected = detect_robot(
-                    frame, intrinsics, extrinsics, settings.robot.travel_height_m,
-                    front_ranges=front_ranges, back_ranges=back_ranges,
-                )
+                detected = _detect_robot_dispatch(frame, intrinsics, extrinsics, settings)
                 if detected is None:
                     annotated = draw_overlay(
                         frame, shelves, robot_pose=None, waypoints=[],
