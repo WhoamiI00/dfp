@@ -87,6 +87,7 @@ def load_shelves(path: Path) -> list[Shelf]:
     shelves = []
     for raw in data["shelves"]:
         try:
+            sku_id_raw = raw.get("sku_id")
             shelves.append(Shelf(
                 id=str(raw["id"]),
                 x_m=float(raw["x_m"]),
@@ -99,6 +100,11 @@ def load_shelves(path: Path) -> list[Shelf]:
                     y_m=float(raw["approach_point"]["y_m"]),
                     heading_deg=float(raw["approach_point"]["heading_deg"]),
                 ),
+                # Inventory fields are optional — older shelves.json files
+                # without them keep loading; new fields default to "untracked".
+                sku_id=str(sku_id_raw) if sku_id_raw is not None else None,
+                inventory_count=int(raw.get("inventory_count", 0)),
+                capacity=int(raw.get("capacity", 0)),
             ))
         except (KeyError, TypeError, ValueError) as e:
             raise ConfigError(f"Malformed shelf entry: {e}") from e
@@ -161,6 +167,12 @@ def save_shelves(shelves: list[Shelf], path: Path) -> None:
                     "y_m": s.approach_point.y_m,
                     "heading_deg": s.approach_point.heading_deg,
                 },
+                # Always write inventory fields (even if defaults) so the
+                # JSON shape is uniform across shelves and the dashboard
+                # doesn't have to special-case missing keys.
+                "sku_id": s.sku_id,
+                "inventory_count": s.inventory_count,
+                "capacity": s.capacity,
             }
             for s in shelves
         ]

@@ -331,3 +331,86 @@ export async function* executeStream(body: {
 export async function abortExecute(): Promise<{ ok: boolean; running: boolean }> {
   return request("/execute/abort", { method: "POST" });
 }
+
+// --- Inventory: orders, stock, auto-replenish ------------------------------
+
+export type OrderStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+export type Order = {
+  id: number;
+  sku_id: string;
+  source_shelf_id: string;
+  destination_shelf_id: string;
+  qty: number;
+  status: OrderStatus;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  error: string | null;
+  reason: string;
+};
+
+export type ShelfInventory = {
+  shelf_id: string;
+  sku_id: string | null;
+  inventory_count: number;
+  capacity: number;
+};
+
+export type SkuTotal = {
+  sku_id: string;
+  total: number;
+  capacity: number;
+  shelves: string[];
+};
+
+export type ReplenishProposal = {
+  sku_id: string;
+  source_shelf_id: string;
+  destination_shelf_id: string;
+  qty: number;
+  reason: string;
+};
+
+export async function listOrders(status?: OrderStatus): Promise<{ orders: Order[] }> {
+  const q = status ? `?status=${status}` : "";
+  return request(`/orders${q}`);
+}
+
+export async function createOrder(body: {
+  sku_id: string;
+  source_shelf_id: string;
+  destination_shelf_id: string;
+  qty?: number;
+  reason?: string;
+}): Promise<Order> {
+  return request("/orders", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function cancelOrder(id: number): Promise<Order> {
+  return request(`/orders/${id}`, { method: "DELETE" });
+}
+
+export async function getInventory(): Promise<{ shelves: ShelfInventory[]; skus: SkuTotal[] }> {
+  return request("/inventory");
+}
+
+export async function previewReplenish(thresholdFraction?: number): Promise<{ proposals: ReplenishProposal[] }> {
+  return request("/replenish/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threshold_fraction: thresholdFraction ?? null }),
+  });
+}
+
+export async function runReplenish(thresholdFraction?: number): Promise<{ enqueued: Order[]; skipped: ReplenishProposal[] }> {
+  return request("/replenish/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threshold_fraction: thresholdFraction ?? null }),
+  });
+}

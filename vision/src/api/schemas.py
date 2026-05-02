@@ -19,6 +19,13 @@ class ShelfSchema(BaseModel):
     length_m: float
     rotation_deg: float
     approach_point: ApproachPointSchema
+    # Inventory bookkeeping (optional). When omitted by older clients
+    # (e.g. the Layout Editor that doesn't know about SKUs yet), the
+    # PUT round-trip preserves None / 0 — same as a freshly auto-detected
+    # shelf has.
+    sku_id: str | None = None
+    inventory_count: int = 0
+    capacity: int = 0
 
 
 class ShelvesPayload(BaseModel):
@@ -231,6 +238,78 @@ class ExecuteStreamRequest(BaseModel):
     destination_shelf_id: str
     port: str | None = None
     baud: int | None = None
+
+
+# --- Inventory orders -------------------------------------------------------
+
+class OrderSchema(BaseModel):
+    id: int
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int
+    status: Literal["pending", "running", "done", "failed", "cancelled"]
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    reason: str = ""
+
+
+class OrderCreateRequest(BaseModel):
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int = 1
+    reason: str = ""
+
+
+class OrdersListResponse(BaseModel):
+    orders: list[OrderSchema]
+
+
+# --- Inventory state --------------------------------------------------------
+
+class ShelfInventory(BaseModel):
+    shelf_id: str
+    sku_id: str | None
+    inventory_count: int
+    capacity: int
+
+
+class SkuTotal(BaseModel):
+    sku_id: str
+    total: int
+    capacity: int
+    shelves: list[str]
+
+
+class InventoryResponse(BaseModel):
+    shelves: list[ShelfInventory]
+    skus: list[SkuTotal]
+
+
+# --- Auto-replenish ---------------------------------------------------------
+
+class ReplenishProposalSchema(BaseModel):
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int
+    reason: str
+
+
+class ReplenishPreviewResponse(BaseModel):
+    proposals: list[ReplenishProposalSchema]
+
+
+class ReplenishRunRequest(BaseModel):
+    threshold_fraction: float | None = None  # default in replenish.py
+
+
+class ReplenishRunResponse(BaseModel):
+    enqueued: list[OrderSchema]
+    skipped: list[ReplenishProposalSchema]  # proposed but not enqueued (e.g. duplicate)
 
 
 # --- Errors -----------------------------------------------------------------

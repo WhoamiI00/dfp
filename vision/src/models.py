@@ -83,6 +83,13 @@ class Shelf:
     length_m: float
     rotation_deg: float
     approach_point: ApproachPoint
+    # Inventory bookkeeping. Optional with safe defaults so existing
+    # shelves.json files without SKU fields keep loading. A shelf with
+    # sku_id=None is treated as a "transit" shelf — pickable but not
+    # tracked by the auto-replenish brain.
+    sku_id: str | None = None
+    inventory_count: int = 0
+    capacity: int = 0
 
 
 # --- Calibration ------------------------------------------------------------
@@ -163,3 +170,31 @@ class ArriveWaypoint:
 
 
 Waypoint = TurnWaypoint | DriveWaypoint | GrabWaypoint | PlaceWaypoint | ArriveWaypoint
+
+
+# --- Inventory orders -------------------------------------------------------
+
+OrderStatus = Literal["pending", "running", "done", "failed", "cancelled"]
+
+
+@dataclass(frozen=True)
+class Order:
+    """One pick-and-place order for the dispatcher.
+
+    The dispatcher (added in a later phase) pulls pending orders FIFO,
+    moves the robot to source -> grab -> dest -> place once per qty unit,
+    and updates source/dest shelf inventory_count after each successful
+    place. Orders are persisted in sqlite so a dispatcher crash doesn't
+    lose pending work.
+    """
+    id: int                # auto-assigned by the queue
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int               # how many units to move; dispatcher loops
+    status: OrderStatus
+    created_at: float      # unix timestamp
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    reason: str = ""       # e.g. "auto_replenish: shelfA below threshold"

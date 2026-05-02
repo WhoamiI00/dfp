@@ -18,6 +18,10 @@ from vision.src.api.schemas import (
     AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
     HsvSampleRequest, HsvSampleResponse, HsvBand,
     CustomHsvUpsertRequest, CustomHsvEntry, CustomHsvListResponse,
+    OrderSchema, OrderCreateRequest, OrdersListResponse,
+    InventoryResponse, ShelfInventory, SkuTotal,
+    ReplenishProposalSchema, ReplenishPreviewResponse,
+    ReplenishRunRequest, ReplenishRunResponse,
 )
 from vision.src.api.config_loader import (
     load_settings, load_shelves, save_shelves, ConfigError,
@@ -53,7 +57,10 @@ from vision.src.robot.link import (
 from vision.src.models import (
     Shelf, ApproachPoint, Extrinsics, ExtrinsicMarker, Pose2D,
     TurnWaypoint, DriveWaypoint, GrabWaypoint, PlaceWaypoint, ArriveWaypoint,
+    Order,
 )
+from vision.src.inventory.orders import OrderQueue, OrderQueueError
+from vision.src.inventory.replenish import replenish_plan, ReplenishProposal
 
 
 # Paths are injected from server.py
@@ -63,20 +70,26 @@ class Paths:
     intrinsics: Path
     extrinsics: Path
     custom_hsv: Path
+    orders_db: Path
 
 
 # Camera singleton is injected from server.py
 _camera: Camera | None = None
+# Order queue singleton is injected from server.py too. None when no
+# inventory feature is wired up — endpoints check and 503 if missing.
+_orders: "OrderQueue | None" = None
 
 
-def set_state(paths: Paths, camera: Camera) -> None:
-    global _camera
+def set_state(paths: Paths, camera: Camera, orders: "OrderQueue | None" = None) -> None:
+    global _camera, _orders
     Paths.settings = paths.settings
     Paths.shelves = paths.shelves
     Paths.intrinsics = paths.intrinsics
     Paths.extrinsics = paths.extrinsics
     Paths.custom_hsv = paths.custom_hsv
+    Paths.orders_db = paths.orders_db
     _camera = camera
+    _orders = orders
 
 
 router = APIRouter(prefix="/api")
@@ -205,6 +218,9 @@ def _shelf_to_schema(s: Shelf) -> ShelfSchema:
             y_m=s.approach_point.y_m,
             heading_deg=s.approach_point.heading_deg,
         ),
+        sku_id=s.sku_id,
+        inventory_count=s.inventory_count,
+        capacity=s.capacity,
     )
 
 
@@ -221,6 +237,9 @@ def _schema_to_shelf(s: ShelfSchema) -> Shelf:
             y_m=s.approach_point.y_m,
             heading_deg=s.approach_point.heading_deg,
         ),
+        sku_id=s.sku_id,
+        inventory_count=s.inventory_count,
+        capacity=s.capacity,
     )
 
 
@@ -1177,3 +1196,200 @@ def robot_send(request: RobotSendRequest):
         ],
         error=result.error,
     )
+
+
+# --- Inventory: orders + state + auto-replenish ----------------------------
+#
+# Phase 1a — order queue and inventory bookkeeping. Phase 1b (the
+# dispatcher that actually consumes orders and drives the robot) will be
+# added once physical testing of the closed-loop is done so we know what
+# failure handling needs to look like. Right now orders just sit on the
+# queue waiting to be dispatched; manual /execute or /execute/stream
+# remains the way to actually move the robot.
+
+def _require_orders() -> OrderQueue:
+    if _orders is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "orders_not_configured"},
+        )
+    return _orders
+
+
+def _order_to_schema(o: Order) -> OrderSchema:
+    return OrderSchema(
+        id=o.id, sku_id=o.sku_id,
+        source_shelf_id=o.source_shelf_id,
+        destination_shelf_id=o.destination_shelf_id,
+        qty=o.qty, status=o.status,
+        created_at=o.created_at,
+        started_at=o.started_at,
+        finished_at=o.finished_at,
+        error=o.error, reason=o.reason,
+    )
+
+
+def _proposal_to_schema(p: ReplenishProposal) -> ReplenishProposalSchema:
+    return ReplenishProposalSchema(
+        sku_id=p.sku_id,
+        source_shelf_id=p.source_shelf_id,
+        destination_shelf_id=p.destination_shelf_id,
+        qty=p.qty, reason=p.reason,
+    )
+
+
+@router.get("/orders", response_model=OrdersListResponse)
+def orders_list(status: str | None = None, limit: int = 100):
+    """List orders, newest first. Optional `status` filter (one of
+    pending/running/done/failed/cancelled)."""
+    orders = _require_orders()
+    if status is not None and status not in (
+        "pending", "running", "done", "failed", "cancelled"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_status", "value": status},
+        )
+    items = orders.list_orders(status=status, limit=limit)
+    return OrdersListResponse(orders=[_order_to_schema(o) for o in items])
+
+
+@router.post("/orders", response_model=OrderSchema, status_code=201)
+def orders_create(request: OrderCreateRequest):
+    """Enqueue a new pick-and-place order. Validates that source and
+    destination shelves exist before accepting."""
+    orders = _require_orders()
+    shelves = {s.id: s for s in load_shelves(Paths.shelves)}
+    for shelf_id in (request.source_shelf_id, request.destination_shelf_id):
+        if shelf_id not in shelves:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_shelf", "shelf_id": shelf_id},
+            )
+    try:
+        order = orders.enqueue(
+            sku_id=request.sku_id,
+            source_shelf_id=request.source_shelf_id,
+            destination_shelf_id=request.destination_shelf_id,
+            qty=request.qty,
+            reason=request.reason,
+        )
+    except OrderQueueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_order", "message": str(e)})
+    return _order_to_schema(order)
+
+
+@router.get("/orders/{order_id}", response_model=OrderSchema)
+def orders_get(order_id: int):
+    orders = _require_orders()
+    try:
+        return _order_to_schema(orders.get(order_id))
+    except OrderQueueError:
+        raise HTTPException(status_code=404, detail={"error": "unknown_order", "id": order_id})
+
+
+@router.delete("/orders/{order_id}", response_model=OrderSchema)
+def orders_cancel(order_id: int):
+    """Cancel a pending order. Returns 409 if it's already running/done."""
+    orders = _require_orders()
+    try:
+        cancelled = orders.cancel(order_id)
+    except OrderQueueError as e:
+        msg = str(e)
+        if "unknown" in msg:
+            raise HTTPException(status_code=404, detail={"error": "unknown_order", "id": order_id})
+        raise HTTPException(status_code=409, detail={"error": "cannot_cancel", "message": msg})
+    return _order_to_schema(cancelled)
+
+
+@router.get("/inventory", response_model=InventoryResponse)
+def inventory_get():
+    """Current per-shelf and per-SKU stock totals.
+
+    Source of truth is shelves.json. The dispatcher (Phase 1b) will update
+    the file after each successful place; for now you can edit shelves
+    manually via the Layout Editor or PUT /shelves."""
+    shelves = load_shelves(Paths.shelves)
+    shelf_inv = [
+        ShelfInventory(
+            shelf_id=s.id, sku_id=s.sku_id,
+            inventory_count=s.inventory_count, capacity=s.capacity,
+        )
+        for s in shelves
+    ]
+    by_sku: dict[str, dict] = {}
+    for s in shelves:
+        if s.sku_id is None:
+            continue
+        bucket = by_sku.setdefault(
+            s.sku_id, {"total": 0, "capacity": 0, "shelves": []},
+        )
+        bucket["total"] += s.inventory_count
+        bucket["capacity"] += s.capacity
+        bucket["shelves"].append(s.id)
+    skus = [
+        SkuTotal(sku_id=k, total=v["total"], capacity=v["capacity"], shelves=v["shelves"])
+        for k, v in sorted(by_sku.items())
+    ]
+    return InventoryResponse(shelves=shelf_inv, skus=skus)
+
+
+@router.post("/replenish/preview", response_model=ReplenishPreviewResponse)
+def replenish_preview(request: ReplenishRunRequest):
+    """Dry-run the auto-replenish brain — returns what it *would* enqueue
+    without actually creating orders. Useful for the dashboard's "preview"
+    button so the user sees the plan before committing."""
+    shelves = load_shelves(Paths.shelves)
+    kwargs = {}
+    if request.threshold_fraction is not None:
+        kwargs["threshold_fraction"] = request.threshold_fraction
+    try:
+        proposals = replenish_plan(shelves, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_threshold", "message": str(e)})
+    return ReplenishPreviewResponse(
+        proposals=[_proposal_to_schema(p) for p in proposals],
+    )
+
+
+@router.post("/replenish/run", response_model=ReplenishRunResponse)
+def replenish_run(request: ReplenishRunRequest):
+    """Run the brain and enqueue its proposals. Skips proposals that
+    would duplicate an already-pending order (same source/dest/SKU) so
+    repeatedly clicking the button doesn't pile up identical orders."""
+    orders = _require_orders()
+    shelves = load_shelves(Paths.shelves)
+    kwargs = {}
+    if request.threshold_fraction is not None:
+        kwargs["threshold_fraction"] = request.threshold_fraction
+    try:
+        proposals = replenish_plan(shelves, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_threshold", "message": str(e)})
+
+    pending = orders.list_orders(status="pending", limit=1000)
+    pending_keys = {
+        (o.sku_id, o.source_shelf_id, o.destination_shelf_id) for o in pending
+    }
+
+    enqueued: list[OrderSchema] = []
+    skipped: list[ReplenishProposalSchema] = []
+    for p in proposals:
+        key = (p.sku_id, p.source_shelf_id, p.destination_shelf_id)
+        if key in pending_keys:
+            skipped.append(_proposal_to_schema(p))
+            continue
+        try:
+            order = orders.enqueue(
+                sku_id=p.sku_id,
+                source_shelf_id=p.source_shelf_id,
+                destination_shelf_id=p.destination_shelf_id,
+                qty=p.qty,
+                reason=p.reason,
+            )
+            enqueued.append(_order_to_schema(order))
+            pending_keys.add(key)
+        except OrderQueueError:
+            skipped.append(_proposal_to_schema(p))
+
+    return ReplenishRunResponse(enqueued=enqueued, skipped=skipped)

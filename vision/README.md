@@ -88,6 +88,43 @@ The mask pipeline now applies CLAHE (Contrast Limited Adaptive Histogram Equaliz
 
 The click-to-sample colour picker in the Calibration tab still works the same way: click the marker in the live frame, the backend returns a forgiving range that masks similar pixels.
 
+## Inventory layer (Phase 1a)
+
+Sits on top of the planning pipeline. Orders are pick-and-place jobs
+(`{sku, source_shelf, dest_shelf, qty}`). The web UI's **Inventory** tab
+exposes:
+
+- Current stock per shelf and per SKU.
+- A "new order" form for manual orders.
+- A rule-based auto-replenish brain: scan all tracked shelves, propose
+  refills for any whose stock is below a threshold, source from the
+  fullest shelf with the same SKU.
+
+Tracked shelves have `sku_id` + `capacity > 0` set in `shelves.json`. Older
+shelves without those fields show up in inventory as untracked (`sku_id` =
+null) and are ignored by the replenish brain — they can still be order
+endpoints though.
+
+State lives in `vision/state/orders.db` (sqlite, auto-created, gitignored).
+Orders survive a backend restart.
+
+**Phase 1a does not yet drive the robot.** Orders sit pending in the queue.
+A dispatcher (Phase 1b) that pulls orders and runs them through
+`/execute/stream` will be added once physical testing of the closed-loop is
+done — failure handling depends on what failures actually look like.
+
+API:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/inventory` | per-shelf and per-SKU stock totals |
+| `GET /api/orders` (?status=) | list orders, newest first |
+| `POST /api/orders` | enqueue manual order |
+| `GET /api/orders/{id}` | single order |
+| `DELETE /api/orders/{id}` | cancel pending order |
+| `POST /api/replenish/preview` | dry-run the brain |
+| `POST /api/replenish/run` | run the brain and enqueue |
+
 ## Test
 
 ```bash

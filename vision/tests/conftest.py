@@ -105,15 +105,18 @@ def client(tmp_config, synthetic_intrinsics, synthetic_extrinsics):
     camera = SwitchableCamera(FakeCamera(frame))
     app = create_app(camera=camera)
 
+    from vision.src.inventory.orders import OrderQueue
+
     paths = Paths()
     paths.settings = tmp_config / "settings.yaml"
     paths.shelves = tmp_config / "shelves.json"
     paths.intrinsics = tmp_config / "camera_intrinsics.yaml"
     paths.extrinsics = tmp_config / "camera_extrinsics.yaml"
     paths.custom_hsv = tmp_config / "custom_hsv.yaml"
+    paths.orders_db = tmp_config / "orders.db"
     save_intrinsics(synthetic_intrinsics, paths.intrinsics)
     save_extrinsics(synthetic_extrinsics, paths.extrinsics)
-    set_state(paths, camera)
+    set_state(paths, camera, orders=OrderQueue(paths.orders_db))
 
     return TestClient(app)
 

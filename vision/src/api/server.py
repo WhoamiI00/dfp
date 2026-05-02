@@ -6,10 +6,14 @@ from fastapi.responses import JSONResponse
 from vision.src.api.routes import router, set_state, Paths
 from vision.src.api.camera import OpenCVCamera, SwitchableCamera
 from vision.src.api.config_loader import load_settings, ConfigError
+from vision.src.inventory.orders import OrderQueue
 
 
 VISION_ROOT = Path(__file__).resolve().parents[2]  # vision/
 CONFIG_DIR = VISION_ROOT / "config"
+
+
+STATE_DIR = VISION_ROOT / "state"
 
 
 def build_paths() -> Paths:
@@ -19,6 +23,9 @@ def build_paths() -> Paths:
     p.intrinsics = CONFIG_DIR / "camera_intrinsics.yaml"
     p.extrinsics = CONFIG_DIR / "camera_extrinsics.yaml"
     p.custom_hsv = CONFIG_DIR / "custom_hsv.yaml"
+    # Runtime state (sqlite, etc.) lives outside config/ since it's
+    # written to and shouldn't be checked into git.
+    p.orders_db = STATE_DIR / "orders.db"
     return p
 
 
@@ -45,7 +52,8 @@ def create_app(camera=None) -> FastAPI:
     if not isinstance(camera, SwitchableCamera):
         camera = SwitchableCamera(camera)
 
-    set_state(paths, camera)
+    orders = OrderQueue(paths.orders_db)
+    set_state(paths, camera, orders=orders)
     app.include_router(router)
 
     # Translate ConfigError to a 500 with the same shape the rest of the API

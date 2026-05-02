@@ -13,3 +13,6 @@ __pycache__/
 # Generated ArUco tag artifacts — regenerate with vision/scripts/generate_tag*.py
 vision/tag_*.png
 /robot_only.png
+
+# Runtime state (sqlite DBs etc.) — not checked in
+vision/state/
