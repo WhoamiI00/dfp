@@ -33,6 +33,13 @@ export default function PlanRunTab() {
   const [loopLog, setLoopLog] = useState<LoopLogEntry[]>([]);
   const streamAbortRef = useRef<AbortController | null>(null);
 
+  // Live preview: poll /api/capture every LIVE_PREVIEW_MS ms and overwrite
+  // the displayed image. Uses fresh=false on the backend so no drain cost.
+  // Auto-pauses while a closed-loop run is streaming (which pushes its own
+  // frames) or while the user is sending a manual command.
+  const [livePreview, setLivePreview] = useState(false);
+  const LIVE_PREVIEW_MS = 400;
+
   useEffect(() => {
     (async () => {
       try {
@@ -55,6 +62,28 @@ export default function PlanRunTab() {
       if (other) setDst(other.id);
     }
   }, [src, dst, shelves]);
+
+  // Live-preview poller. Pauses during streaming/manual to avoid stomping on
+  // the SSE-driven frame or racing with manual commands.
+  useEffect(() => {
+    if (!livePreview || streaming || executing) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const r = await capture();
+        if (!cancelled) setImageB64(r.image_base64);
+      } catch {
+        // Network blip — silently skip; the next tick will retry.
+      }
+    };
+    tick();  // fire one immediately so the user sees the preview start fast
+    const id = setInterval(tick, LIVE_PREVIEW_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [livePreview, streaming, executing]);
 
   const handleToggleSim = async () => {
     try {
@@ -249,11 +278,19 @@ export default function PlanRunTab() {
       </div>
 
       <div className="col-span-6 space-y-2">
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-2 flex-wrap items-center">
           <button type="button" onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded">Capture</button>
           <button type="button" onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded">Detect</button>
           <button type="button" onClick={handleDetectDebug} className="px-3 py-1 bg-amber-600 rounded" title="Show raw color masks for tuning">Debug masks</button>
           <button type="button" onClick={handlePlan} className="px-3 py-1 bg-green-600 rounded">Plan</button>
+          <label className="flex items-center gap-1 text-sm text-white/70 ml-2" title="Auto-refresh the camera frame every 400 ms">
+            <input
+              type="checkbox"
+              checked={livePreview}
+              onChange={e => setLivePreview(e.target.checked)}
+            />
+            Live preview
+          </label>
         </div>
         {imageB64 && (
           <img src={`data:image/png;base64,${imageB64}`} alt="vision feed" className="w-full border border-white/20" />

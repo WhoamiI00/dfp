@@ -9,7 +9,14 @@ robot:
     front_color: pink
     back_color: blue
 camera:
-  source: 0
+  # Source can be:
+  #   0, 1, 2, ...   -> local USB webcam index (try 1 if 0 is the laptop's built-in)
+  #   "http://HOST:8080/video"  -> Android IP Webcam MJPEG stream
+  #   "rtsp://..."   -> RTSP camera
+  # Phone-on-hotspot setup: phone reaches the laptop directly on the hotspot
+  # subnet (192.168.137.x by default on Windows). College LAN doesn't need to
+  # see the phone — they're separate adapters.
+  source: "http://192.168.137.19:8080/video"
   resolution: [1280, 720]
 planner:
   obstacle_inflation_m: 0.10

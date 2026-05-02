@@ -108,9 +108,19 @@ def _require_extrinsics():
     return load_extrinsics(Paths.extrinsics)
 
 
-def _capture_frame() -> np.ndarray:
+def _capture_frame(fresh: bool = True) -> np.ndarray:
+    """Capture a frame for an HTTP request.
+
+    `fresh=True` is the default — used for /detect, /plan, /execute, and the
+    closed-loop step controller, which all depend on the frame reflecting
+    the robot's current physical state.
+
+    Pass `fresh=False` for viewfinder-style endpoints (the bare /capture and
+    /detect/debug) where the user is just looking, and the per-call drain
+    cost (~100 ms on a 1080p IP Webcam) makes the UI feel laggy.
+    """
     try:
-        return _camera.capture()
+        return _camera.capture(fresh=fresh)
     except CameraError as e:
         raise HTTPException(
             status_code=503,
@@ -364,7 +374,10 @@ def hsv_sample(request: HsvSampleRequest):
     the median HSV plus a suggested forgiving range. Used by the Calibration
     tab's color picker to build a tolerant marker range from a single click.
     """
-    frame = _capture_frame()
+    # The user just clicked on the displayed frame — they expect to sample
+    # what they saw, which means the buffered frame, not whatever the next
+    # drained frame turns out to be.
+    frame = _capture_frame(fresh=False)
     try:
         ranges, median = sample_hsv_range_from_pixel(
             frame,
@@ -617,8 +630,12 @@ def camera_clear_image():
 # --- Capture / detect -------------------------------------------------------
 
 @router.get("/capture", response_model=CaptureResponse)
-def capture():
-    frame = _capture_frame()
+def capture(fresh: bool = False):
+    """Return a single frame as base64 PNG. Default `fresh=False` skips the
+    drain step so the viewfinder feels snappy on a 1080p IP Webcam (~30 ms
+    instead of ~100 ms per call). Pass `?fresh=true` if you specifically
+    need a guaranteed-current frame."""
+    frame = _capture_frame(fresh=fresh)
     return CaptureResponse(image_base64=_encode_image(frame), timestamp=time.time())
 
 
@@ -628,7 +645,9 @@ def detect_debug():
     overlay showing what the detector actually picks up. Used for tuning
     HSV ranges or diagnosing 'markers not found' failures."""
     settings = load_settings(Paths.settings)
-    frame = _capture_frame()
+    # Debug view — the user is iterating on thresholds, latency matters
+    # more than guaranteed-fresh frames here.
+    frame = _capture_frame(fresh=False)
     front_ranges = _resolve_color(settings.robot.markers.front_color)
     back_ranges = _resolve_color(settings.robot.markers.back_color)
 
@@ -994,8 +1013,10 @@ def execute_stream(request: ExecuteStreamRequest):
                     return
 
                 # --- Perceive ---
+                # fresh=True: closed-loop only works if each iteration sees
+                # the post-action state, not a stale buffered frame.
                 try:
-                    frame = _camera.capture()
+                    frame = _camera.capture(fresh=True)
                 except CameraError as e:
                     yield _sse_event("error", {
                         "error": "camera_unavailable",

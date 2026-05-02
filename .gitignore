@@ -9,3 +9,7 @@ venv_ubuntu/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Generated ArUco tag artifacts — regenerate with vision/scripts/generate_tag*.py
+vision/tag_*.png
+/robot_only.png
