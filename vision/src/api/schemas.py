@@ -213,6 +213,26 @@ class CustomHsvListResponse(BaseModel):
     entries: list[CustomHsvEntry]
 
 
+# --- Robot mode (sim / live) -----------------------------------------------
+
+class RobotMode(BaseModel):
+    sim: bool
+
+
+class RobotModeRequest(BaseModel):
+    sim: bool
+
+
+# --- Closed-loop execute ----------------------------------------------------
+
+class ExecuteStreamRequest(BaseModel):
+    task: Literal["navigate", "pick_place"]
+    source_shelf_id: str | None = None
+    destination_shelf_id: str
+    port: str | None = None
+    baud: int | None = None
+
+
 # --- Errors -----------------------------------------------------------------
 
 class ErrorResponse(BaseModel):

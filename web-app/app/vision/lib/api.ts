@@ -215,3 +215,119 @@ export async function sendRobotCommand(sequence: string): Promise<{
     body: JSON.stringify({ sequence }),
   });
 }
+
+// --- Robot mode (sim / live BT) --------------------------------------------
+
+export async function getRobotMode(): Promise<{ sim: boolean }> {
+  return request("/robot/mode");
+}
+
+export async function setRobotMode(sim: boolean): Promise<{ sim: boolean }> {
+  return request("/robot/mode", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sim }),
+  });
+}
+
+// --- Closed-loop /execute/stream (Server-Sent Events) ----------------------
+//
+// Native EventSource is GET-only and we need POST + JSON body, so we drive
+// the stream with fetch + a ReadableStream parser. Yields parsed
+// `{event, data}` records for the React component to consume via for-await.
+
+export type StreamEvent =
+  | { event: "step"; data: StepEventData }
+  | { event: "ack"; data: AckEventData }
+  | { event: "done"; data: DoneEventData }
+  | { event: "aborted"; data: TerminalEventData }
+  | { event: "stuck"; data: StuckEventData }
+  | { event: "step_budget_exceeded"; data: BudgetEventData }
+  | { event: "error"; data: ErrorEventData };
+
+export type StepEventData = {
+  step_idx: number;
+  pose: { x_m: number; y_m: number; heading_deg: number } | null;
+  next_cmd: string | null;
+  sequence_so_far: string;
+  frame_b64: string;
+};
+
+export type AckEventData = {
+  step_idx: number;
+  cmd: string;
+  reply: string;
+  elapsed_ms: number;
+  ok: boolean;
+  error?: string;
+};
+
+export type DoneEventData = { sequence: string; steps: number; message: string };
+export type TerminalEventData = { sequence: string; steps: number };
+export type StuckEventData = TerminalEventData & { pose: { x_m: number; y_m: number; heading_deg: number } };
+export type BudgetEventData = TerminalEventData & { max_steps: number };
+export type ErrorEventData = {
+  error: string;
+  message?: string;
+  sequence?: string;
+  steps?: number;
+  frame_b64?: string;
+};
+
+export async function* executeStream(body: {
+  task: "navigate" | "pick_place";
+  source_shelf_id?: string;
+  destination_shelf_id: string;
+  port?: string;
+  baud?: number;
+  signal?: AbortSignal;
+}): AsyncGenerator<StreamEvent> {
+  const { signal, ...payload } = body;
+  const res = await fetch(`${API_BASE}/execute/stream`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "accept": "text/event-stream" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok) {
+    let detail: unknown;
+    try { detail = await res.json(); } catch { detail = await res.text(); }
+    throw new Error(JSON.stringify(detail));
+  }
+  if (!res.body) throw new Error("No response body for SSE stream");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  // SSE frames are separated by blank lines. Within a frame, lines starting
+  // with "event:" / "data:" carry the payload. We accumulate bytes, split on
+  // blank-line boundaries, and parse each complete frame.
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      let eventName = "message";
+      let dataText = "";
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) eventName = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataText += line.slice(5).trim();
+      }
+      if (!dataText) continue;
+      try {
+        const data = JSON.parse(dataText);
+        yield { event: eventName, data } as StreamEvent;
+      } catch {
+        // Malformed frame -> skip rather than abort the whole stream.
+      }
+    }
+  }
+}
+
+export async function abortExecute(): Promise<{ ok: boolean; running: boolean }> {
+  return request("/execute/abort", { method: "POST" });
+}

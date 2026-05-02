@@ -1,9 +1,21 @@
 "use client";
-import { useEffect, useState } from "react";
-import { getShelves, capture, detect, detectDebug, plan, executePlan, sendRobotCommand } from "../lib/api";
+import { useEffect, useRef, useState } from "react";
+import {
+  getShelves, capture, detect, detectDebug, plan, executePlan, sendRobotCommand,
+  getRobotMode, setRobotMode, executeStream, abortExecute,
+  type AckEventData,
+} from "../lib/api";
 import type { Shelf, Waypoint, PlanMetrics } from "../lib/types";
 
 type TaskType = "navigate" | "pick_place";
+
+type LoopLogEntry = {
+  step: number;
+  cmd: string;
+  reply: string;
+  elapsed_ms: number;
+  ok: boolean;
+};
 
 export default function PlanRunTab() {
   const [shelves, setShelves] = useState<Shelf[]>([]);
@@ -16,6 +28,11 @@ export default function PlanRunTab() {
   const [message, setMessage] = useState("");
   const [executing, setExecuting] = useState(false);
 
+  const [simMode, setSimMode] = useState<boolean>(false);
+  const [streaming, setStreaming] = useState(false);
+  const [loopLog, setLoopLog] = useState<LoopLogEntry[]>([]);
+  const streamAbortRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -24,6 +41,10 @@ export default function PlanRunTab() {
         if (data.shelves.length >= 1) setSrc(data.shelves[0].id);
         if (data.shelves.length >= 2) setDst(data.shelves[1].id);
       } catch (e) { setMessage(String(e)); }
+      try {
+        const m = await getRobotMode();
+        setSimMode(m.sim);
+      } catch { /* non-fatal: backend might be older */ }
     })();
   }, []);
 
@@ -34,6 +55,14 @@ export default function PlanRunTab() {
       if (other) setDst(other.id);
     }
   }, [src, dst, shelves]);
+
+  const handleToggleSim = async () => {
+    try {
+      const m = await setRobotMode(!simMode);
+      setSimMode(m.sim);
+      setMessage(m.sim ? "Sim mode ON — fake serial, no Bluetooth." : "Live BT mode — commands go to the robot.");
+    } catch (e) { setMessage(String(e)); }
+  };
 
   const handleCapture = async () => {
     try {
@@ -103,8 +132,69 @@ export default function PlanRunTab() {
     }
   };
 
+  const handleExecuteClosedLoop = async () => {
+    if (!dst || streaming) return;
+    setStreaming(true);
+    setLoopLog([]);
+    setWaypoints([]);
+    setMetrics(null);
+    setMessage("Closed-loop running — capturing and replanning every step.");
+
+    const ctrl = new AbortController();
+    streamAbortRef.current = ctrl;
+
+    try {
+      const stream = executeStream({
+        task: taskType,
+        source_shelf_id: taskType === "pick_place" ? src : undefined,
+        destination_shelf_id: dst,
+        signal: ctrl.signal,
+      });
+      for await (const ev of stream) {
+        if (ev.event === "step") {
+          setImageB64(ev.data.frame_b64);
+          if (ev.data.next_cmd) {
+            setMessage(`Step ${ev.data.step_idx}: pose (${ev.data.pose?.x_m.toFixed(2)}, ${ev.data.pose?.y_m.toFixed(2)}) @ ${ev.data.pose?.heading_deg.toFixed(0)}° → ${ev.data.next_cmd}`);
+          }
+        } else if (ev.event === "ack") {
+          const a = ev.data as AckEventData;
+          setLoopLog(prev => [...prev, {
+            step: a.step_idx, cmd: a.cmd, reply: a.reply,
+            elapsed_ms: a.elapsed_ms, ok: a.ok,
+          }]);
+        } else if (ev.event === "done") {
+          setMessage(`Done in ${ev.data.steps} steps. Sequence: ${ev.data.sequence || "(none)"} — ${ev.data.message}`);
+        } else if (ev.event === "aborted") {
+          setMessage(`Aborted after ${ev.data.steps} steps. Sequence so far: ${ev.data.sequence || "(none)"}`);
+        } else if (ev.event === "stuck") {
+          setMessage(`Stuck after ${ev.data.steps} steps — robot stopped making progress. Check motors / BT link.`);
+        } else if (ev.event === "step_budget_exceeded") {
+          setMessage(`Step budget (${ev.data.max_steps}) exceeded — increase closed_loop.max_steps in settings.yaml if the path is genuinely long.`);
+        } else if (ev.event === "error") {
+          if (ev.data.frame_b64) setImageB64(ev.data.frame_b64);
+          setMessage(`Error: ${ev.data.error}${ev.data.message ? " — " + ev.data.message : ""}`);
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") setMessage(`Stream failed: ${e}`);
+    } finally {
+      setStreaming(false);
+      streamAbortRef.current = null;
+    }
+  };
+
+  const handleAbort = async () => {
+    if (!streaming) return;
+    try {
+      await abortExecute();
+      setMessage("Abort signalled — waiting for current step to finish.");
+    } catch (e) {
+      setMessage(`Abort failed: ${e}`);
+    }
+  };
+
   const handleManual = async (cmd: "F" | "B" | "L" | "R" | "S") => {
-    if (executing) return;
+    if (executing || streaming) return;
     setExecuting(true);
     setMessage(`Sending ${cmd}…`);
     try {
@@ -117,9 +207,24 @@ export default function PlanRunTab() {
     }
   };
 
+  const busy = executing || streaming;
+
   return (
     <div className="grid grid-cols-12 gap-4">
       <div className="col-span-3 space-y-3">
+        <div className="flex items-center gap-2 p-2 rounded border border-white/10">
+          <span className={`text-xs px-2 py-1 rounded ${simMode ? "bg-amber-700" : "bg-emerald-700"}`}>
+            {simMode ? "🧪 SIM" : "🔌 LIVE BT"}
+          </span>
+          <button
+            type="button"
+            onClick={handleToggleSim}
+            disabled={busy}
+            className="text-xs underline text-white/70 hover:text-white disabled:opacity-40"
+          >
+            switch
+          </button>
+        </div>
         <label className="block">
           <span className="text-white/60 text-sm">Task</span>
           <select value={taskType} onChange={e => setTaskType(e.target.value as TaskType)} className="w-full bg-black border border-white/20 px-2 py-1">
@@ -144,7 +249,7 @@ export default function PlanRunTab() {
       </div>
 
       <div className="col-span-6 space-y-2">
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button type="button" onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded">Capture</button>
           <button type="button" onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded">Detect</button>
           <button type="button" onClick={handleDetectDebug} className="px-3 py-1 bg-amber-600 rounded" title="Show raw color masks for tuning">Debug masks</button>
@@ -154,11 +259,22 @@ export default function PlanRunTab() {
           <img src={`data:image/png;base64,${imageB64}`} alt="vision feed" className="w-full border border-white/20" />
         )}
         {message && <div className="text-sm text-white/80">{message}</div>}
+
+        {loopLog.length > 0 && (
+          <div className="text-xs font-mono bg-black/50 border border-white/10 rounded p-2 max-h-40 overflow-auto">
+            <div className="text-white/40 mb-1">Closed-loop command log</div>
+            {loopLog.map((e, i) => (
+              <div key={i} className={e.ok ? "text-white/80" : "text-red-400"}>
+                [{String(e.step).padStart(2, " ")}] {e.cmd} → {e.reply} ({e.elapsed_ms} ms)
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="col-span-3 space-y-2">
         <div className="font-bold">Waypoints</div>
-        <ol className="text-sm space-y-1 max-h-96 overflow-auto">
+        <ol className="text-sm space-y-1 max-h-72 overflow-auto">
           {waypoints.map((w, i) => (
             <li key={i} className="border-l-2 border-blue-400 pl-2">
               <div className="text-white">{w.type}</div>
@@ -174,14 +290,35 @@ export default function PlanRunTab() {
             <div>Est. time: {metrics.estimated_time_s.toFixed(1)} s</div>
           </div>
         )}
+
+        <button
+          type="button"
+          onClick={handleExecuteClosedLoop}
+          disabled={busy || !dst || (taskType === "pick_place" && !src)}
+          className="w-full px-3 py-2 bg-purple-600 rounded disabled:bg-gray-700 disabled:opacity-50"
+          title="Capture, replan, send one char, repeat. Frame updates after every step."
+        >
+          {streaming ? "Closed-loop running…" : "Execute (closed-loop)"}
+        </button>
+        {streaming && (
+          <button
+            type="button"
+            onClick={handleAbort}
+            className="w-full px-3 py-2 bg-red-700 rounded"
+            title="Stop after the current step finishes"
+          >
+            Abort
+          </button>
+        )}
+
         <button
           type="button"
           onClick={handleExecute}
-          disabled={executing || !dst || (taskType === "pick_place" && !src)}
+          disabled={busy || !dst || (taskType === "pick_place" && !src)}
           className="w-full px-3 py-2 bg-red-600 rounded disabled:bg-gray-700 disabled:opacity-50"
-          title="Re-plan from a fresh camera frame and stream the sequence to the robot over Bluetooth"
+          title="Open-loop: plan once and blast the whole sequence. Useful for debugging."
         >
-          {executing ? "Executing…" : "Execute on Robot"}
+          {executing ? "Executing…" : "Execute (open-loop)"}
         </button>
 
         <div className="pt-3 mt-3 border-t border-white/10">
@@ -191,7 +328,7 @@ export default function PlanRunTab() {
             <button
               type="button"
               onClick={() => handleManual("F")}
-              disabled={executing}
+              disabled={busy}
               className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
               title="Forward one cell"
             >▲</button>
@@ -199,21 +336,21 @@ export default function PlanRunTab() {
             <button
               type="button"
               onClick={() => handleManual("L")}
-              disabled={executing}
+              disabled={busy}
               className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
               title="Turn left 90°"
             >◀</button>
             <button
               type="button"
               onClick={() => handleManual("S")}
-              disabled={executing}
+              disabled={busy}
               className="px-3 py-2 bg-gray-600 rounded disabled:opacity-40"
               title="Stop"
             >■</button>
             <button
               type="button"
               onClick={() => handleManual("R")}
-              disabled={executing}
+              disabled={busy}
               className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
               title="Turn right 90°"
             >▶</button>
@@ -221,7 +358,7 @@ export default function PlanRunTab() {
             <button
               type="button"
               onClick={() => handleManual("B")}
-              disabled={executing}
+              disabled={busy}
               className="px-3 py-2 bg-blue-700 rounded disabled:opacity-40"
               title="Backward one cell"
             >▼</button>

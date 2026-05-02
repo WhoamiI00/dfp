@@ -13,3 +13,9 @@ camera:
   resolution: [1280, 720]
 planner:
   obstacle_inflation_m: 0.10
+closed_loop:
+  arrival_tolerance_m: 0.25          # ~1 cell
+  arrival_heading_tolerance_deg: 30
+  max_steps: 50                       # ~100 s max run at typical step times
+  stuck_position_threshold_m: 0.05    # min progress per F to count as moving
+  stuck_window_steps: 3               # consecutive Fs below threshold -> abort

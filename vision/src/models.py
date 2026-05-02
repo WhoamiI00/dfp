@@ -39,11 +39,21 @@ class PlannerConfig:
 
 
 @dataclass(frozen=True)
+class ClosedLoopConfig:
+    arrival_tolerance_m: float = 0.25
+    arrival_heading_tolerance_deg: float = 30.0
+    max_steps: int = 50
+    stuck_position_threshold_m: float = 0.05
+    stuck_window_steps: int = 3
+
+
+@dataclass(frozen=True)
 class Settings:
     workspace: WorkspaceConfig
     robot: RobotConfig
     camera: CameraConfig
     planner: PlannerConfig
+    closed_loop: ClosedLoopConfig = field(default_factory=ClosedLoopConfig)
 
 
 # --- Shelves ----------------------------------------------------------------

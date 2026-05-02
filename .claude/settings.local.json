@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest vision/tests/test_fake_link.py -v)",
+      "Bash(python -m pytest vision/tests/test_controller.py -v)",
+      "Bash(python -m pytest vision/tests -x --ignore=vision/tests/test_controller.py --ignore=vision/tests/test_fake_link.py)",
+      "Bash(python -m pytest vision/tests/test_execute_stream.py -v)",
+      "Bash(python -m pytest \"c:/Users/ankit/Pictures/dfp/vision/tests\")"
+    ]
+  }
+}

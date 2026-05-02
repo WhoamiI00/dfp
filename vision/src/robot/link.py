@@ -40,6 +40,27 @@ class ExecuteResult:
     error: str | None = None
 
 
+# --- Sim mode flag ----------------------------------------------------------
+# Process-wide override settable at runtime via POST /robot/mode. When None,
+# falls back to the ROBOT_SIM environment variable. Lets the UI flip between
+# real BT and fake serial without restarting the server.
+_sim_override: bool | None = None
+
+
+def _env_sim() -> bool:
+    return os.environ.get("ROBOT_SIM", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_sim_mode() -> bool:
+    return _sim_override if _sim_override is not None else _env_sim()
+
+
+def set_sim_mode(enabled: bool | None) -> None:
+    """Set the runtime sim flag. Pass None to clear and fall back to env."""
+    global _sim_override
+    _sim_override = enabled
+
+
 def send_sequence(
     sequence: str,
     port: str = DEFAULT_PORT,
@@ -47,8 +68,15 @@ def send_sequence(
 ) -> ExecuteResult:
     """Open `port`, send each char of `sequence` and wait for its ack.
 
+    In sim mode, delegates to `send_sequence_fake` — no serial I/O at all.
+    Otherwise opens the port, streams chars, waits for OK/PONG per char.
     Aborts on the first non-OK/non-PONG reply. Always closes the port.
     """
+    if is_sim_mode():
+        # Imported lazily so non-sim production doesn't pay the import cost.
+        from vision.src.robot.fake_link import send_sequence_fake
+        return send_sequence_fake(sequence, port=port, baud=baud)
+
     if not sequence:
         return ExecuteResult(ok=True, chars_sent=0, log=[])
 

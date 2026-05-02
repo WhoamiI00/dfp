@@ -6,7 +6,7 @@ import yaml
 from vision.src.detection.hsv_ranges import HsvRange
 from vision.src.models import (
     Settings, WorkspaceConfig, RobotConfig, RobotMarkers, CameraConfig,
-    PlannerConfig, Shelf, ApproachPoint,
+    PlannerConfig, ClosedLoopConfig, Shelf, ApproachPoint,
 )
 
 
@@ -39,9 +39,26 @@ def load_settings(path: Path) -> Settings:
             planner=PlannerConfig(
                 obstacle_inflation_m=float(data["planner"]["obstacle_inflation_m"]),
             ),
+            closed_loop=_parse_closed_loop(data.get("closed_loop") or {}),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ConfigError(f"Malformed settings.yaml: {e}") from e
+
+
+def _parse_closed_loop(data: dict) -> ClosedLoopConfig:
+    """Closed-loop section is optional; missing keys fall back to dataclass defaults."""
+    defaults = ClosedLoopConfig()
+    return ClosedLoopConfig(
+        arrival_tolerance_m=float(data.get("arrival_tolerance_m", defaults.arrival_tolerance_m)),
+        arrival_heading_tolerance_deg=float(
+            data.get("arrival_heading_tolerance_deg", defaults.arrival_heading_tolerance_deg)
+        ),
+        max_steps=int(data.get("max_steps", defaults.max_steps)),
+        stuck_position_threshold_m=float(
+            data.get("stuck_position_threshold_m", defaults.stuck_position_threshold_m)
+        ),
+        stuck_window_steps=int(data.get("stuck_window_steps", defaults.stuck_window_steps)),
+    )
 
 
 def load_shelves(path: Path) -> list[Shelf]:

@@ -1,17 +1,20 @@
 """FastAPI route handlers for the vision module."""
 import base64
+import json
+import threading
 import time
 from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from vision.src.api.schemas import (
     ShelvesPayload, ShelfSchema, ApproachPointSchema,
     CalibrationStatus, IntrinsicResult, ExtrinsicResult, ManualExtrinsicRequest,
     CaptureResponse, DetectResponse, DetectDebugResponse, RobotPoseSchema,
     PlanRequest, PlanResponse, WaypointSchema, Pose2DSchema, PlanMetrics,
     ExecuteRequest, ExecuteResponse, ExecuteCommandLog, RobotSendRequest,
-    CameraMode,
+    CameraMode, RobotMode, RobotModeRequest, ExecuteStreamRequest,
     AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
     HsvSampleRequest, HsvSampleResponse, HsvBand,
     CustomHsvUpsertRequest, CustomHsvEntry, CustomHsvListResponse,
@@ -37,9 +40,15 @@ from vision.src.detection.hsv_ranges import (
 )
 from vision.src.planning.task import plan_navigate_to, plan_pick_and_place
 from vision.src.planning.errors import NoPathError, ApproachPointBlockedError
+from vision.src.planning.controller import (
+    at_goal, is_stuck, goal_pose_for_shelf, next_command, pose_from_detection,
+    StepHistory,
+)
 from vision.src.rendering.overlay import draw_overlay
 from vision.src.robot.protocol import plan_to_chars
-from vision.src.robot.link import send_sequence, DEFAULT_PORT, DEFAULT_BAUD
+from vision.src.robot.link import (
+    send_sequence, DEFAULT_PORT, DEFAULT_BAUD, is_sim_mode, set_sim_mode,
+)
 from vision.src.models import (
     Shelf, ApproachPoint, Extrinsics, ExtrinsicMarker, Pose2D,
     TurnWaypoint, DriveWaypoint, GrabWaypoint, PlaceWaypoint, ArriveWaypoint,
@@ -778,6 +787,19 @@ def plan(request: PlanRequest):
     )
 
 
+# --- Robot mode (sim / live) -----------------------------------------------
+
+@router.get("/robot/mode", response_model=RobotMode)
+def robot_mode_get():
+    return RobotMode(sim=is_sim_mode())
+
+
+@router.post("/robot/mode", response_model=RobotMode)
+def robot_mode_set(request: RobotModeRequest):
+    set_sim_mode(request.sim)
+    return RobotMode(sim=is_sim_mode())
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(request: ExecuteRequest):
     """Re-plan from the current camera frame, translate the waypoints into the
@@ -850,6 +872,253 @@ def execute(request: ExecuteRequest):
         ],
         error=result.error,
     )
+
+
+# --- Closed-loop execute (Server-Sent Events) ------------------------------
+#
+# The open-loop /execute endpoint above plans once and blasts the whole
+# sequence. Closed-loop re-detects the pose after every single char so motor
+# drift and approximate firmware timing self-correct instead of accumulating.
+#
+# One run at a time, guarded by a lock. The abort flag lets the UI stop a
+# run mid-stream (POST /execute/abort).
+
+_run_lock = threading.Lock()
+_abort_event = threading.Event()
+
+
+def _sse_event(name: str, payload: dict) -> bytes:
+    """Format a single Server-Sent Event frame."""
+    return f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
+def _build_step_payload(
+    step_idx: int,
+    pose,
+    next_cmd: str | None,
+    sequence_so_far: str,
+    annotated_b64: str,
+) -> dict:
+    return {
+        "step_idx": step_idx,
+        "pose": (
+            None if pose is None
+            else {"x_m": pose.x_m, "y_m": pose.y_m, "heading_deg": pose.heading_deg}
+        ),
+        "next_cmd": next_cmd,
+        "sequence_so_far": sequence_so_far,
+        "frame_b64": annotated_b64,
+    }
+
+
+@router.post("/execute/abort")
+def execute_abort():
+    """Signal the active /execute/stream run to stop after its current step.
+
+    No-op if no run is in flight. The flag is auto-cleared at the start of
+    the next run, so spurious aborts don't leak into the next button-press.
+    """
+    _abort_event.set()
+    return {"ok": True, "running": _run_lock.locked()}
+
+
+@router.post("/execute/stream")
+def execute_stream(request: ExecuteStreamRequest):
+    """Closed-loop execute: capture -> detect -> plan one char -> send -> repeat.
+
+    Streams progress as Server-Sent Events. Event types:
+      - step:                {step_idx, pose, next_cmd, sequence_so_far, frame_b64}
+      - ack:                 {step_idx, cmd, reply, elapsed_ms, ok, error?}
+      - done:                {sequence, steps, message}
+      - aborted:             {sequence, steps}
+      - stuck:               {sequence, steps, pose}
+      - step_budget_exceeded:{sequence, steps, max_steps}
+      - error:               {error, message?, sequence?, steps?}
+
+    Re-planning every step is sub-millisecond on a 10x10 grid, so transient
+    detection noise can't lock in a bad plan.
+    """
+    if _run_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "execute_already_running"},
+        )
+
+    intrinsics = _require_intrinsics()
+    extrinsics = _require_extrinsics()
+    settings = load_settings(Paths.settings)
+    shelves = load_shelves(Paths.shelves)
+    cfg = settings.closed_loop
+    ws = settings.workspace
+
+    # Resolve the destination shelf early so a typo errors out before streaming.
+    try:
+        goal = goal_pose_for_shelf(shelves, request.destination_shelf_id)
+    except KeyError as e:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_shelf", "message": str(e)},
+        )
+
+    front_ranges = _resolve_color(settings.robot.markers.front_color)
+    back_ranges = _resolve_color(settings.robot.markers.back_color)
+    port = request.port or DEFAULT_PORT
+    baud = request.baud or DEFAULT_BAUD
+
+    def gen():
+        # Acquire here (not in the endpoint body) so the lock is released after
+        # the generator finishes streaming, even if the client disconnects.
+        if not _run_lock.acquire(blocking=False):
+            yield _sse_event("error", {"error": "execute_already_running"})
+            return
+        _abort_event.clear()
+        history = StepHistory.empty()
+        sequence_so_far = ""
+        step_idx = 0
+
+        try:
+            while True:
+                if _abort_event.is_set():
+                    yield _sse_event("aborted", {
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                    })
+                    return
+
+                if step_idx >= cfg.max_steps:
+                    yield _sse_event("step_budget_exceeded", {
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                        "max_steps": cfg.max_steps,
+                    })
+                    return
+
+                # --- Perceive ---
+                try:
+                    frame = _camera.capture()
+                except CameraError as e:
+                    yield _sse_event("error", {
+                        "error": "camera_unavailable",
+                        "message": str(e),
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                    })
+                    return
+
+                detected = detect_robot(
+                    frame, intrinsics, extrinsics, settings.robot.travel_height_m,
+                    front_ranges=front_ranges, back_ranges=back_ranges,
+                )
+                if detected is None:
+                    annotated = draw_overlay(
+                        frame, shelves, robot_pose=None, waypoints=[],
+                        intrinsics=intrinsics, extrinsics=extrinsics,
+                        travel_height_m=settings.robot.travel_height_m,
+                    )
+                    yield _sse_event("error", {
+                        "error": "robot_not_detected",
+                        "frame_b64": _encode_image(annotated),
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                    })
+                    return
+
+                pose = pose_from_detection(detected, ws.width_m, ws.height_m)
+
+                # --- Decide ---
+                if at_goal(pose, goal, cfg):
+                    annotated = draw_overlay(
+                        frame, shelves, detected, waypoints=[],
+                        intrinsics=intrinsics, extrinsics=extrinsics,
+                        travel_height_m=settings.robot.travel_height_m,
+                    )
+                    yield _sse_event("step", _build_step_payload(
+                        step_idx, pose, None, sequence_so_far, _encode_image(annotated),
+                    ))
+                    yield _sse_event("done", {
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                        "message": f"arrived at {request.destination_shelf_id}",
+                    })
+                    return
+
+                try:
+                    cmd = next_command(pose, request.destination_shelf_id, shelves, settings)
+                except (NoPathError, ApproachPointBlockedError) as e:
+                    yield _sse_event("error", {
+                        "error": "no_path",
+                        "message": str(e),
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                    })
+                    return
+
+                if cmd is None:
+                    # Planner says we're done but at_goal disagreed — treat as done
+                    # to avoid an infinite loop. Tolerance is the source of truth.
+                    yield _sse_event("done", {
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                        "message": "planner returned no waypoints",
+                    })
+                    return
+
+                # Render before sending so the UI sees the pose+plan that
+                # produced this command, not the one after it executed.
+                annotated = draw_overlay(
+                    frame, shelves, detected, waypoints=[],
+                    intrinsics=intrinsics, extrinsics=extrinsics,
+                    travel_height_m=settings.robot.travel_height_m,
+                )
+                yield _sse_event("step", _build_step_payload(
+                    step_idx, pose, cmd, sequence_so_far, _encode_image(annotated),
+                ))
+
+                # --- Act ---
+                result = send_sequence(cmd, port=port, baud=baud)
+                ack_payload = {
+                    "step_idx": step_idx,
+                    "cmd": cmd,
+                    "reply": result.log[0].reply if result.log else "",
+                    "elapsed_ms": result.log[0].elapsed_ms if result.log else 0,
+                    "ok": result.ok,
+                }
+                if result.error:
+                    ack_payload["error"] = result.error
+                yield _sse_event("ack", ack_payload)
+
+                if not result.ok:
+                    yield _sse_event("error", {
+                        "error": "send_failed",
+                        "message": result.error or "send_sequence reported failure",
+                        "sequence": sequence_so_far + cmd,
+                        "steps": step_idx + 1,
+                    })
+                    return
+
+                sequence_so_far += cmd
+                history.append(cmd, pose)
+                step_idx += 1
+
+                # --- Stuck check (after appending so the new sample is included) ---
+                if is_stuck(history, cfg):
+                    yield _sse_event("stuck", {
+                        "sequence": sequence_so_far,
+                        "steps": step_idx,
+                        "pose": {
+                            "x_m": pose.x_m, "y_m": pose.y_m,
+                            "heading_deg": pose.heading_deg,
+                        },
+                    })
+                    return
+        finally:
+            _abort_event.clear()
+            _run_lock.release()
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # disables proxy buffering on nginx etc
+    })
 
 
 @router.post("/robot/send", response_model=ExecuteResponse)
