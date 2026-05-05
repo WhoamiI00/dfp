@@ -57,12 +57,68 @@ class ClosedLoopConfig:
 
 
 @dataclass(frozen=True)
+class RobotLinkConfig:
+    """How the backend talks to the physical robot.
+
+    type:
+        wifi -> HTTP to ESP32 (default for new builds)
+        sim  -> in-process fake link, no hardware needed
+    """
+    type: str = "wifi"
+    host: str = "10.82.225.95"
+    port: int = 80
+    # Drive timing (motor pulses with no encoder feedback). Tuned empirically
+    # against the cell size in workspace.cell_size_m. The closed-loop
+    # controller compensates for drift via vision so these only need to be
+    # close, not exact.
+    cell_drive_ms: int = 800
+    turn_90_ms: int = 600
+    # Manipulator timing.
+    slider_extend_ms: int = 1500
+    slider_retract_ms: int = 1500
+    gripper_settle_ms: int = 400
+    # Move-between-shelves sequence (canned-execute, dead-reckoning).
+    # After grabbing from source shelf, the robot needs to physically reach
+    # the destination shelf. With no vision, we run a hardcoded 4-step
+    # sequence and tune the timings empirically:
+    #
+    #   1. backward `move_back_after_grab_ms`  -- clear the source shelf
+    #   2. turn `move_turn_dir` for `move_turn_ms`  -- face new direction
+    #   3. forward `move_forward_to_dest_ms` -- approach destination
+    #   4. turn opposite direction for `move_turn_ms`  -- align with shelf
+    #
+    # Each timing is a per-pair guess; tune by running once and watching
+    # where the robot ends up.
+    move_back_after_grab_ms: int = 1500
+    move_turn_ms: int = 1000               # for ~90° turn
+    move_turn_dir: str = "L"               # "L" or "R" for the first turn
+    move_forward_to_dest_ms: int = 3000
+    # Lift control. The ultrasonic on the carriage points up at the mast top.
+    # Smaller distance = higher floor. travel_distance_cm is the rest position
+    # (also doubles as the bottom-floor target).
+    travel_distance_cm: float = 25.0
+    lift_tolerance_cm: float = 2.0
+    # Lift runs as long as the carriage is making progress. We check every
+    # lift_stall_window_ms whether the sensor reading changed by at least
+    # lift_min_progress_cm. If yes, keep going. If no (motor stalled, hit a
+    # stop, sensor stuck), abort. lift_max_runtime_ms is a hard upper bound
+    # that should only fire if both the stall check and the target check
+    # somehow miss — generous so a slow real lift isn't a problem.
+    lift_stall_window_ms: int = 1500
+    lift_min_progress_cm: float = 0.5
+    lift_max_runtime_ms: int = 30000
+    # HTTP request timeout for /cmd and /distance.
+    request_timeout_s: float = 1.5
+
+
+@dataclass(frozen=True)
 class Settings:
     workspace: WorkspaceConfig
     robot: RobotConfig
     camera: CameraConfig
     planner: PlannerConfig
     closed_loop: ClosedLoopConfig = field(default_factory=ClosedLoopConfig)
+    robot_link: RobotLinkConfig = field(default_factory=RobotLinkConfig)
 
 
 # --- Shelves ----------------------------------------------------------------
@@ -90,6 +146,15 @@ class Shelf:
     sku_id: str | None = None
     inventory_count: int = 0
     capacity: int = 0
+    # Lift target as read by the upward-facing ultrasonic on the carriage.
+    # Smaller cm = higher floor (carriage closer to mast top). None = single-
+    # floor shelf, no lift step required (legacy + transit shelves).
+    floor_distance_cm: float | None = None
+    # Open-loop alternative: timed lift pulses, no sensor feedback. Operator
+    # measures travel time per floor with the Manual UP button and bakes them
+    # in. Canned-execute uses these. Both 0 for the bottom (rest) floor.
+    lift_up_ms: int = 0
+    lift_down_ms: int = 0
 
 
 # --- Calibration ------------------------------------------------------------

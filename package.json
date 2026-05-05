@@ -1,0 +1,20 @@
+{
+  "name": "dfp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run scripts for the DFP backend (FastAPI) + frontend (Next.js).",
+  "scripts": {
+    "backend": "python -m vision.scripts.run_server",
+    "frontend": "npm --prefix web-app run dev",
+    "rl": "cross-env PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python inventory-rl/api.py",
+    "dev": "concurrently --kill-others --names BE,RL,FE --prefix-colors cyan,yellow,magenta \"npm run backend\" \"npm run rl\" \"npm run frontend\"",
+    "build": "npm --prefix web-app run build",
+    "test:backend": "python -m pytest vision/tests",
+    "test:frontend": "npm --prefix web-app run lint && npx --prefix web-app tsc --noEmit -p web-app/tsconfig.json",
+    "test": "npm run test:backend && npm run test:frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "cross-env": "^10.1.0"
+  }
+}

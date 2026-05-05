@@ -85,7 +85,11 @@ def tmp_config(tmp_path: Path):
     settings_data["robot"]["markers"]["back_color"] = "green"
     with (config_dir / "settings.yaml").open("w") as f:
         yaml.safe_dump(settings_data, f)
-    shutil.copy(source_config / "shelves.json", config_dir / "shelves.json")
+    # Tests use a stable 3-shelf fixture (shelf_A/B/C) regardless of what's
+    # in the live production shelves.json. This decouples test expectations
+    # from the auto-seeded 6-shelf production layout.
+    fixture_dir = Path(__file__).resolve().parent / "fixtures"
+    shutil.copy(fixture_dir / "shelves.fixture.json", config_dir / "shelves.json")
     return config_dir
 
 

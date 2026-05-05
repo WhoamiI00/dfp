@@ -332,6 +332,35 @@ export async function abortExecute(): Promise<{ ok: boolean; running: boolean }>
   return request("/execute/abort", { method: "POST" });
 }
 
+// --- Canned (no-vision) pick-place -----------------------------------------
+
+export type CannedExecuteStep = {
+  label: string;
+  ok: boolean;
+  elapsed_ms: number;
+  reply: string;
+  error?: string | null;
+};
+
+export type CannedExecuteResponse = {
+  ok: boolean;
+  from_shelf: string;
+  to_shelf: string;
+  steps: CannedExecuteStep[];
+  error?: string | null;
+};
+
+export async function executeCanned(body: {
+  from_shelf: string;
+  to_shelf: string;
+}): Promise<CannedExecuteResponse> {
+  return request("/execute/canned", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 // --- Inventory: orders, stock, auto-replenish ------------------------------
 
 export type OrderStatus = "pending" | "running" | "done" | "failed" | "cancelled";
@@ -413,4 +442,238 @@ export async function runReplenish(thresholdFraction?: number): Promise<{ enqueu
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ threshold_fraction: thresholdFraction ?? null }),
   });
+}
+
+export async function updateShelfInventory(
+  shelfId: string,
+  body: { sku_id?: string | null; inventory_count: number },
+): Promise<ShelfInventory> {
+  return request(`/inventory/shelf/${encodeURIComponent(shelfId)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export type RunNextOrderResult = {
+  ok: boolean;
+  order: Order | null;
+  executed: CannedExecuteResponse | null;
+  message: string;
+};
+
+export async function runNextOrder(): Promise<RunNextOrderResult> {
+  return request("/orders/run-next", { method: "POST" });
+}
+
+// --- Inventory-RL advisor (separate service on :8000) ----------------------
+
+const RL_API_BASE = "http://127.0.0.1:8000";
+
+export type RLPrediction = {
+  action: number;
+  order_quantity: number;
+  reasoning: string;
+  inventory_status: string;
+  demand_forecast: string;
+  formatted_log: string;
+};
+
+export type RLStatus = {
+  status: string;
+  model_loaded: boolean;
+  requests_served: number;
+  total_units_ordered: number;
+  last_5_orders: number[];
+};
+
+export async function rlStatus(): Promise<RLStatus> {
+  const res = await fetch(`${RL_API_BASE}/`);
+  if (!res.ok) throw new Error(`rl_status ${res.status}`);
+  return res.json();
+}
+
+export async function rlPredict(body: {
+  inventory: number;
+  day_index: number;
+  day_of_week: number;
+  previous_demand?: number | null;
+  previous_sold?: number | null;
+}): Promise<RLPrediction> {
+  const res = await fetch(`${RL_API_BASE}/predict`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail: unknown;
+    try { detail = await res.json(); } catch { detail = await res.text(); }
+    throw new Error(JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+export async function rlReset(): Promise<{ status: string; message: string }> {
+  const res = await fetch(`${RL_API_BASE}/reset`, { method: "POST" });
+  if (!res.ok) throw new Error(`rl_reset ${res.status}`);
+  return res.json();
+}
+
+// --- RL forecasting / multi-episode simulation -----------------------------
+
+export type RLPolicy = "random" | "eoq" | "rl";
+
+export type RLEpisodeDay = {
+  day: number;
+  day_of_week: string;
+  inventory_start: number;
+  order_qty: number;
+  demand: number;
+  sold: number;
+  unmet_demand: number;
+  inventory_end: number;
+  reward: number;
+};
+
+export type RLEpisodeStat = {
+  episode: number;
+  total_reward: number;
+  stockout_days: number;
+  overstock_days: number;
+  service_level: number;
+  avg_inventory: number;
+};
+
+export type RLAggregate = {
+  avg_total_reward: number;
+  avg_stockout_days: number;
+  avg_overstock_days: number;
+  avg_service_level: number;
+  avg_inventory: number;
+};
+
+export type RLSimulateResult = {
+  policy: RLPolicy;
+  policy_label: string;
+  episodes_run: number;
+  aggregate: RLAggregate;
+  per_episode: RLEpisodeStat[];
+  last_episode_days: RLEpisodeDay[];
+  used_model: boolean;
+  notes: string;
+  heatmap: number[][];
+};
+
+export type RLPolicyComparisonRow = {
+  policy: RLPolicy;
+  policy_label: string;
+  used_model: boolean;
+  aggregate: RLAggregate;
+  per_episode_rewards: number[];
+  notes: string;
+};
+
+export type RLCompareResult = {
+  rows: RLPolicyComparisonRow[];
+  episodes: number;
+  seed: number | null;
+};
+
+export type RLSimulateRequest = {
+  policy: RLPolicy;
+  episodes: number;
+  seed?: number | null;
+  initial_inventory: number;
+  max_capacity: number;
+  trend_strength: number;
+  eoq_avg_demand?: number;
+  eoq_reorder_point?: number;
+};
+
+export async function rlSimulate(body: RLSimulateRequest): Promise<RLSimulateResult> {
+  const res = await fetch(`${RL_API_BASE}/simulate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail: unknown;
+    try { detail = await res.json(); } catch { detail = await res.text(); }
+    throw new Error(JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+export type RLCompareRequest = {
+  episodes: number;
+  seed?: number | null;
+  initial_inventory: number;
+  max_capacity: number;
+  trend_strength: number;
+  eoq_avg_demand?: number;
+  eoq_reorder_point?: number;
+};
+
+export async function rlCompare(body: RLCompareRequest): Promise<RLCompareResult> {
+  const res = await fetch(`${RL_API_BASE}/compare`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail: unknown;
+    try { detail = await res.json(); } catch { detail = await res.text(); }
+    throw new Error(JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+// --- Movement plans (operator-built sequences run from the UI) -------------
+
+export type MovementStepType =
+  | "drive_forward" | "drive_backward" | "turn_left" | "turn_right"
+  | "lift_to" | "lift_up_for" | "lift_down_for"
+  | "slider_extend" | "slider_retract"
+  | "gripper_open" | "gripper_close"
+  | "wait";
+
+export type MovementStep = {
+  type: MovementStepType;
+  duration_ms: number;
+  target_cm: number;
+  note: string;
+};
+
+export type MovementPlan = {
+  name: string;
+  steps: MovementStep[];
+  note: string;
+};
+
+export type MovementPlanRunResult = {
+  ok: boolean;
+  plan_name: string;
+  steps: CannedExecuteStep[];
+  error: string | null;
+  sim: boolean;
+};
+
+export async function listPlans(): Promise<{ plans: MovementPlan[] }> {
+  return request("/plans");
+}
+
+export async function savePlan(name: string, plan: MovementPlan): Promise<MovementPlan> {
+  return request(`/plans/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(plan),
+  });
+}
+
+export async function deletePlan(name: string): Promise<{ ok: boolean }> {
+  return request(`/plans/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+export async function runPlan(name: string): Promise<MovementPlanRunResult> {
+  return request(`/plans/${encodeURIComponent(name)}/run`, { method: "POST" });
 }

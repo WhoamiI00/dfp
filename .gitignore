@@ -1,7 +1,6 @@
+# --- Python ----------------------------------------------------------------
 /venv
 venv/
-/media
-media/
 /venv_ubuntu
 venv_ubuntu/
 .env
@@ -9,10 +8,57 @@ venv_ubuntu/
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / Next.js --------------------------------------------------------
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+# Next.js + Turbopack build outputs and caches
+out/
+.turbo/
+**/.turbo/
+# Frontend build artifacts
+web-app/build/
+web-app/dist/
+
+# --- Editor / OS -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Project-specific ------------------------------------------------------
+/media
+media/
 
 # Generated ArUco tag artifacts — regenerate with vision/scripts/generate_tag*.py
 vision/tag_*.png
 /robot_only.png
 
-# Runtime state (sqlite DBs etc.) — not checked in
+# Runtime state (sqlite DBs, movement plans, etc.) — not checked in
 vision/state/
+
+# Local Claude / agent settings shouldn't leak across machines
+.claude/settings.local.json
+
+# Throwaway debug images (root-level test screenshots and gemini outputs)
+/*.png
+/*.jpeg
+/*.jpg
+# But keep README badges and intentional repo images if any get added
+!docs/**/*.png
+!docs/**/*.jpg
+
+# RL training artifacts (huge, regenerable from agents/train_*.py)
+inventory-rl/logs/
+inventory-rl/models/*.zip
+!inventory-rl/models/.gitkeep
+inventory-rl/results/*.png
+!inventory-rl/results/.gitkeep

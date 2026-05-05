@@ -1,43 +1,137 @@
 {
   "shelves": [
     {
-      "id": "shelf_A",
-      "x_m": 0.7072131859730005,
-      "y_m": 0.06907503664504877,
-      "width_m": 0.4,
+      "id": "shelf_1_a",
+      "x_m": 1.5,
+      "y_m": 0.6,
+      "width_m": 0.3,
       "length_m": 0.3,
       "rotation_deg": 0.0,
       "approach_point": {
-        "x_m": 0.7072131859730005,
-        "y_m": 0.8190750366450488,
-        "heading_deg": 270.0
-      }
+        "x_m": 1.1,
+        "y_m": 0.6,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 25.0,
+      "lift_up_ms": 0,
+      "lift_down_ms": 0
     },
     {
-      "id": "shelf_B",
-      "x_m": 1.103467815251202,
-      "y_m": 0.058850283359607736,
-      "width_m": 0.4,
+      "id": "shelf_1_b",
+      "x_m": 1.5,
+      "y_m": 0.6,
+      "width_m": 0.3,
       "length_m": 0.3,
       "rotation_deg": 0.0,
       "approach_point": {
-        "x_m": 1.103467815251202,
-        "y_m": 0.8088502833596077,
-        "heading_deg": 270.0
-      }
+        "x_m": 1.1,
+        "y_m": 0.6,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 15.0,
+      "lift_up_ms": 1500,
+      "lift_down_ms": 1500
     },
     {
-      "id": "shelf_C",
-      "x_m": 1.4974979298743336,
-      "y_m": 0.05511793449211688,
-      "width_m": 0.4,
+      "id": "shelf_1_c",
+      "x_m": 1.5,
+      "y_m": 0.6,
+      "width_m": 0.3,
       "length_m": 0.3,
       "rotation_deg": 0.0,
       "approach_point": {
-        "x_m": 1.4974979298743336,
-        "y_m": 0.8051179344921169,
-        "heading_deg": 270.0
-      }
+        "x_m": 1.1,
+        "y_m": 0.6,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 5.0,
+      "lift_up_ms": 3000,
+      "lift_down_ms": 3000
+    },
+    {
+      "id": "shelf_2_a",
+      "x_m": 1.5,
+      "y_m": 1.9,
+      "width_m": 0.3,
+      "length_m": 0.3,
+      "rotation_deg": 0.0,
+      "approach_point": {
+        "x_m": 1.1,
+        "y_m": 1.9,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 25.0,
+      "lift_up_ms": 0,
+      "lift_down_ms": 0
+    },
+    {
+      "id": "shelf_2_b",
+      "x_m": 1.5,
+      "y_m": 1.9,
+      "width_m": 0.3,
+      "length_m": 0.3,
+      "rotation_deg": 0.0,
+      "approach_point": {
+        "x_m": 1.1,
+        "y_m": 1.9,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 15.0,
+      "lift_up_ms": 1500,
+      "lift_down_ms": 1500
+    },
+    {
+      "id": "shelf_2_c",
+      "x_m": 1.5,
+      "y_m": 1.9,
+      "width_m": 0.3,
+      "length_m": 0.3,
+      "rotation_deg": 0.0,
+      "approach_point": {
+        "x_m": 1.1,
+        "y_m": 1.9,
+        "heading_deg": 0.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 0,
+      "capacity": 5,
+      "floor_distance_cm": 5.0,
+      "lift_up_ms": 3000,
+      "lift_down_ms": 3000
+    },
+    {
+      "id": "conveyer",
+      "x_m": 0.4,
+      "y_m": 1.25,
+      "width_m": 0.3,
+      "length_m": 0.3,
+      "rotation_deg": 0.0,
+      "approach_point": {
+        "x_m": 0.8,
+        "y_m": 1.25,
+        "heading_deg": 180.0
+      },
+      "sku_id": "widget",
+      "inventory_count": 29,
+      "capacity": 99,
+      "floor_distance_cm": 25.0,
+      "lift_up_ms": 0,
+      "lift_down_ms": 0
     }
   ]
 }

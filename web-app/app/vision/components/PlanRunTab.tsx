@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import {
-  getShelves, capture, detect, detectDebug, plan, executePlan, sendRobotCommand,
+  getShelves, capture, detect, plan, executePlan, sendRobotCommand,
   getRobotMode, setRobotMode, executeStream, abortExecute,
+  autoDetectShelves,
   type AckEventData,
 } from "../lib/api";
 import type { Shelf, Waypoint, PlanMetrics } from "../lib/types";
@@ -110,19 +111,26 @@ export default function PlanRunTab() {
     } catch (e) { setMessage(String(e)); }
   };
 
-  const handleDetectDebug = async () => {
+  const handleDetectShelves = async () => {
     try {
-      const r = await detectDebug();
-      setImageB64(r.mask_overlay_base64);
+      setMessage("Detecting shelves…");
+      // Preview-only: do NOT overwrite the saved layout. The seeded production
+      // shelves (with correct stacked-floor approach points) stay intact, and
+      // the user sees what auto-detect would propose. Use the Layout Editor
+      // tab if you actually want to commit detected positions.
+      const r = await autoDetectShelves({ persist: false });
+      setImageB64(r.annotated_image_base64);
       setWaypoints([]);
       setMetrics(null);
-      const frontOk = r.front_largest_area_px >= r.min_marker_area_px;
-      const backOk = r.back_largest_area_px >= r.min_marker_area_px;
       setMessage(
-        `Front (${r.front_color_name}): largest blob ${r.front_largest_area_px}px ${frontOk ? "✓" : "✗ (need ≥" + r.min_marker_area_px + ")"}. ` +
-        `Back (${r.back_color_name}): largest blob ${r.back_largest_area_px}px ${backOk ? "✓" : "✗ (need ≥" + r.min_marker_area_px + ")"}.`,
+        r.shelves.length === 0
+          ? "No shelf markers detected — using saved layout for planning."
+          : `Detected ${r.shelves.length} shelf marker${r.shelves.length === 1 ? "" : "s"} (preview only). Saved layout unchanged.`,
       );
-    } catch (e) { setMessage(String(e)); }
+    } catch (e) {
+      // Detection failure is non-fatal — Plan can still use the saved layout.
+      setMessage(`Detect shelves failed (saved layout still usable): ${e}`);
+    }
   };
 
   const handlePlan = async () => {
@@ -279,10 +287,10 @@ export default function PlanRunTab() {
 
       <div className="col-span-6 space-y-2">
         <div className="flex gap-2 flex-wrap items-center">
-          <button type="button" onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded">Capture</button>
-          <button type="button" onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded">Detect</button>
-          <button type="button" onClick={handleDetectDebug} className="px-3 py-1 bg-amber-600 rounded" title="Show raw color masks for tuning">Debug masks</button>
-          <button type="button" onClick={handlePlan} className="px-3 py-1 bg-green-600 rounded">Plan</button>
+          <button type="button" onClick={handleCapture} className="px-3 py-1 bg-gray-600 rounded" title="Grab a raw frame from the camera">Capture</button>
+          <button type="button" onClick={handleDetect} className="px-3 py-1 bg-blue-600 rounded" title="Find the robot's pose in the current frame">Detect</button>
+          <button type="button" onClick={handleDetectShelves} className="px-3 py-1 bg-cyan-600 rounded" title="Find shelves in the current frame and save them">Detect shelves</button>
+          <button type="button" onClick={handlePlan} className="px-3 py-1 bg-green-600 rounded" title="Plan a path between the selected shelves">Plan</button>
           <label className="flex items-center gap-1 text-sm text-white/70 ml-2" title="Auto-refresh the camera frame every 400 ms">
             <input
               type="checkbox"
