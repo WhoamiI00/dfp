@@ -85,7 +85,11 @@ def tmp_config(tmp_path: Path):
     settings_data["robot"]["markers"]["back_color"] = "green"
     with (config_dir / "settings.yaml").open("w") as f:
         yaml.safe_dump(settings_data, f)
-    shutil.copy(source_config / "shelves.json", config_dir / "shelves.json")
+    # Tests use a stable 3-shelf fixture (shelf_A/B/C) regardless of what's
+    # in the live production shelves.json. This decouples test expectations
+    # from the auto-seeded 6-shelf production layout.
+    fixture_dir = Path(__file__).resolve().parent / "fixtures"
+    shutil.copy(fixture_dir / "shelves.fixture.json", config_dir / "shelves.json")
     return config_dir
 
 
@@ -105,15 +109,18 @@ def client(tmp_config, synthetic_intrinsics, synthetic_extrinsics):
     camera = SwitchableCamera(FakeCamera(frame))
     app = create_app(camera=camera)
 
+    from vision.src.inventory.orders import OrderQueue
+
     paths = Paths()
     paths.settings = tmp_config / "settings.yaml"
     paths.shelves = tmp_config / "shelves.json"
     paths.intrinsics = tmp_config / "camera_intrinsics.yaml"
     paths.extrinsics = tmp_config / "camera_extrinsics.yaml"
     paths.custom_hsv = tmp_config / "custom_hsv.yaml"
+    paths.orders_db = tmp_config / "orders.db"
     save_intrinsics(synthetic_intrinsics, paths.intrinsics)
     save_extrinsics(synthetic_extrinsics, paths.extrinsics)
-    set_state(paths, camera)
+    set_state(paths, camera, orders=OrderQueue(paths.orders_db))
 
     return TestClient(app)
 

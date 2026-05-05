@@ -19,6 +19,19 @@ class ShelfSchema(BaseModel):
     length_m: float
     rotation_deg: float
     approach_point: ApproachPointSchema
+    # Inventory bookkeeping (optional). When omitted by older clients
+    # (e.g. the Layout Editor that doesn't know about SKUs yet), the
+    # PUT round-trip preserves None / 0 — same as a freshly auto-detected
+    # shelf has.
+    sku_id: str | None = None
+    inventory_count: int = 0
+    capacity: int = 0
+    # Lift target on the carriage's upward-facing ultrasonic. Smaller cm =
+    # higher floor. None for legacy single-floor / transit shelves.
+    floor_distance_cm: float | None = None
+    # Open-loop timed lift durations, used by canned-execute (no sensor).
+    lift_up_ms: int = 0
+    lift_down_ms: int = 0
 
 
 class ShelvesPayload(BaseModel):
@@ -119,14 +132,12 @@ class PlanResponse(BaseModel):
     metrics: PlanMetrics
 
 
-# --- Execute (stream plan over Bluetooth) -----------------------------------
+# --- Execute (over WiFi link to ESP32) -------------------------------------
 
 class ExecuteRequest(BaseModel):
     task: Literal["navigate", "pick_place"]
     source_shelf_id: str | None = None
     destination_shelf_id: str
-    port: str | None = None   # e.g. "COM6"; defaults to ROBOT_PORT env / COM6
-    baud: int | None = None   # defaults to ROBOT_BAUD env / 9600
 
 
 class ExecuteCommandLog(BaseModel):
@@ -145,8 +156,34 @@ class ExecuteResponse(BaseModel):
 
 class RobotSendRequest(BaseModel):
     sequence: str            # one or more protocol chars, e.g. "F" or "FFLR"
-    port: str | None = None
-    baud: int | None = None
+
+
+class CannedExecuteRequest(BaseModel):
+    """Run a hardcoded pick-place between two shelves with no planner / no vision.
+
+    Dead-reckons the move using cell_drive_ms from settings. Operator must
+    position the robot manually with the gripper-back facing the source
+    shelf before triggering. Use only on a known starting pose — drift is
+    not corrected.
+    """
+    from_shelf: str
+    to_shelf: str
+
+
+class CannedExecuteStep(BaseModel):
+    label: str        # human-readable, e.g. "drive_forward(4160ms)" or "grab:O"
+    ok: bool
+    elapsed_ms: int
+    reply: str
+    error: str | None = None
+
+
+class CannedExecuteResponse(BaseModel):
+    ok: bool
+    from_shelf: str
+    to_shelf: str
+    steps: list[CannedExecuteStep]
+    error: str | None = None
 
 
 # --- Layout auto-detect -----------------------------------------------------
@@ -229,8 +266,132 @@ class ExecuteStreamRequest(BaseModel):
     task: Literal["navigate", "pick_place"]
     source_shelf_id: str | None = None
     destination_shelf_id: str
-    port: str | None = None
-    baud: int | None = None
+
+
+# --- Inventory orders -------------------------------------------------------
+
+class OrderSchema(BaseModel):
+    id: int
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int
+    status: Literal["pending", "running", "done", "failed", "cancelled"]
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    reason: str = ""
+
+
+class OrderCreateRequest(BaseModel):
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int = 1
+    reason: str = ""
+
+
+class OrdersListResponse(BaseModel):
+    orders: list[OrderSchema]
+
+
+# --- Inventory state --------------------------------------------------------
+
+class ShelfInventory(BaseModel):
+    shelf_id: str
+    sku_id: str | None
+    inventory_count: int
+    capacity: int
+
+
+class SkuTotal(BaseModel):
+    sku_id: str
+    total: int
+    capacity: int
+    shelves: list[str]
+
+
+class InventoryResponse(BaseModel):
+    shelves: list[ShelfInventory]
+    skus: list[SkuTotal]
+
+
+class ShelfInventoryUpdate(BaseModel):
+    sku_id: str | None = None
+    inventory_count: int
+
+
+# --- Movement plans ---------------------------------------------------------
+
+MovementStepType = Literal[
+    "drive_forward", "drive_backward", "turn_left", "turn_right",
+    "lift_to", "lift_up_for", "lift_down_for",
+    "slider_extend", "slider_retract",
+    "gripper_open", "gripper_close",
+    "wait",
+]
+
+
+class MovementStepSchema(BaseModel):
+    type: MovementStepType
+    duration_ms: int = 0
+    target_cm: float = 0.0
+    note: str = ""
+
+
+class MovementPlanSchema(BaseModel):
+    name: str
+    steps: list[MovementStepSchema] = []
+    note: str = ""
+
+
+class MovementPlansListResponse(BaseModel):
+    plans: list[MovementPlanSchema]
+
+
+class MovementPlanRunResponse(BaseModel):
+    ok: bool
+    plan_name: str
+    steps: list[CannedExecuteStep]
+    error: str | None = None
+    sim: bool = False  # True if executed against the fake link
+
+
+class RunNextOrderResponse(BaseModel):
+    """Result of dispatching the next pending order via canned-execute.
+
+    `order` is the order in its post-run state (status=done/failed). When
+    the queue is empty `order` is None and `ok` is True. `executed` carries
+    the canned-execute step trace so the UI can show what happened on the
+    robot side."""
+    ok: bool
+    order: OrderSchema | None = None
+    executed: CannedExecuteResponse | None = None
+    message: str = ""
+
+
+# --- Auto-replenish ---------------------------------------------------------
+
+class ReplenishProposalSchema(BaseModel):
+    sku_id: str
+    source_shelf_id: str
+    destination_shelf_id: str
+    qty: int
+    reason: str
+
+
+class ReplenishPreviewResponse(BaseModel):
+    proposals: list[ReplenishProposalSchema]
+
+
+class ReplenishRunRequest(BaseModel):
+    threshold_fraction: float | None = None  # default in replenish.py
+
+
+class ReplenishRunResponse(BaseModel):
+    enqueued: list[OrderSchema]
+    skipped: list[ReplenishProposalSchema]  # proposed but not enqueued (e.g. duplicate)
 
 
 # --- Errors -----------------------------------------------------------------

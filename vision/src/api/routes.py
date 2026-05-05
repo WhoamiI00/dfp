@@ -18,6 +18,14 @@ from vision.src.api.schemas import (
     AutoDetectShelvesRequest, AutoDetectShelvesResponse, AutoDetectedShelf,
     HsvSampleRequest, HsvSampleResponse, HsvBand,
     CustomHsvUpsertRequest, CustomHsvEntry, CustomHsvListResponse,
+    OrderSchema, OrderCreateRequest, OrdersListResponse,
+    InventoryResponse, ShelfInventory, SkuTotal, ShelfInventoryUpdate,
+    ReplenishProposalSchema, ReplenishPreviewResponse,
+    ReplenishRunRequest, ReplenishRunResponse,
+    CannedExecuteRequest, CannedExecuteResponse, CannedExecuteStep,
+    RunNextOrderResponse,
+    MovementStepSchema, MovementPlanSchema,
+    MovementPlansListResponse, MovementPlanRunResponse,
 )
 from vision.src.api.config_loader import (
     load_settings, load_shelves, save_shelves, ConfigError,
@@ -47,13 +55,15 @@ from vision.src.planning.controller import (
 )
 from vision.src.rendering.overlay import draw_overlay
 from vision.src.robot.protocol import plan_to_chars
-from vision.src.robot.link import (
-    send_sequence, DEFAULT_PORT, DEFAULT_BAUD, is_sim_mode, set_sim_mode,
-)
+from vision.src.robot.link import send_sequence, is_sim_mode, set_sim_mode
+from vision.src.robot.wifi_link import WifiLink
 from vision.src.models import (
     Shelf, ApproachPoint, Extrinsics, ExtrinsicMarker, Pose2D,
     TurnWaypoint, DriveWaypoint, GrabWaypoint, PlaceWaypoint, ArriveWaypoint,
+    Order,
 )
+from vision.src.inventory.orders import OrderQueue, OrderQueueError
+from vision.src.inventory.replenish import replenish_plan, ReplenishProposal
 
 
 # Paths are injected from server.py
@@ -63,20 +73,34 @@ class Paths:
     intrinsics: Path
     extrinsics: Path
     custom_hsv: Path
+    orders_db: Path
+    movement_plans: Path
 
 
 # Camera singleton is injected from server.py
 _camera: Camera | None = None
+# Order queue singleton is injected from server.py too. None when no
+# inventory feature is wired up — endpoints check and 503 if missing.
+_orders: "OrderQueue | None" = None
 
 
-def set_state(paths: Paths, camera: Camera) -> None:
-    global _camera
+def set_state(paths: Paths, camera: Camera, orders: "OrderQueue | None" = None) -> None:
+    global _camera, _orders
     Paths.settings = paths.settings
     Paths.shelves = paths.shelves
     Paths.intrinsics = paths.intrinsics
     Paths.extrinsics = paths.extrinsics
     Paths.custom_hsv = paths.custom_hsv
+    Paths.orders_db = paths.orders_db
+    # Movement plans path is optional — older test setups inject a Paths
+    # object without it. Default to a sibling of orders_db so plans land
+    # in the same state dir.
+    Paths.movement_plans = getattr(
+        paths, "movement_plans",
+        paths.orders_db.parent / "movement_plans.json",
+    )
     _camera = camera
+    _orders = orders
 
 
 router = APIRouter(prefix="/api")
@@ -177,6 +201,129 @@ def _resolve_color(name: str) -> list[HsvRange]:
         )
 
 
+def _has_shelf(shelves: list[Shelf], shelf_id: str) -> bool:
+    return any(s.id == shelf_id for s in shelves)
+
+
+def _run_manipulator_sequence(
+    wifi_link, link_cfg, action: str, shelf: Shelf | None,
+):
+    """Run a grab or place sequence and return a list of SubAcks for the log.
+
+    Routes through the WiFi link when one is available, else falls back to
+    the fake link (sim mode) which just emits a single "OK" SubAck.
+    """
+    from vision.src.robot.wifi_link import SubAck
+    floor_cm = shelf.floor_distance_cm if shelf is not None else None
+
+    if wifi_link is not None:
+        if action == "grab":
+            return wifi_link.grab_at(floor_cm)
+        return wifi_link.place_at(floor_cm)
+
+    # Sim path: pretend the whole multi-step sequence happened in one beat.
+    # Mirrors the legacy single-char G/P semantics so existing sim tests
+    # don't have to know about the new lift/slider/gripper plumbing.
+    from vision.src.robot.fake_link import send_sequence_fake
+    ch = "G" if action == "grab" else "P"
+    fake = send_sequence_fake(ch)
+    log_entry = fake.log[0] if fake.log else None
+    return [SubAck(
+        cmd=ch,
+        reply=log_entry.reply if log_entry else "OK",
+        elapsed_ms=log_entry.elapsed_ms if log_entry else 0,
+        ok=fake.ok, error=fake.error,
+    )]
+
+
+def _refresh_shelves_from_frame(intrinsics, extrinsics, settings) -> list[Shelf]:
+    """Detect shelves in the current frame and persist them.
+
+    Uses the configured robot front-marker colour as the shelf marker colour
+    (single-colour shelves are the common case; multi-colour cells need
+    explicit `/layout/auto_detect` calls per colour).
+
+    Returns [] on any failure (camera dead, no blobs, unknown colour). Caller
+    decides whether to fall back to disk.
+    """
+    try:
+        frame = _capture_frame()
+    except CameraError:
+        return []
+
+    marker_color = settings.robot.markers.front_color
+    try:
+        marker_ranges = _resolve_color(marker_color)
+    except HTTPException:
+        return []
+
+    candidates = detect_shelf_candidates(
+        frame,
+        marker_ranges=marker_ranges,
+        intrinsics=intrinsics,
+        extrinsics=extrinsics,
+        max_count=16,
+    )
+    if not candidates:
+        return []
+
+    shelves = _shelves_from_candidates(
+        candidates, settings,
+        id_prefix="cell_",
+        approach_offset_m=0.30,
+        shelf_width_m=0.30,
+        shelf_length_m=0.30,
+    )
+    save_shelves(shelves, Paths.shelves)
+    return shelves
+
+
+def _shelves_from_candidates(
+    candidates,
+    settings,
+    *,
+    id_prefix: str,
+    approach_offset_m: float,
+    shelf_width_m: float,
+    shelf_length_m: float,
+) -> list[Shelf]:
+    """Build full Shelf objects from auto-detected candidates.
+
+    Picks the approach side (north/south) per shelf based on which side has
+    more free workspace — better than a hardcoded north-only default for
+    layouts where shelves are near a wall. Approach heading is set so
+    "drive forward" moves the robot toward the shelf.
+    """
+    ws = settings.workspace
+    shelves: list[Shelf] = []
+    for i, cand in enumerate(candidates):
+        shelf_id = f"{id_prefix}{chr(ord('A') + i)}"
+        space_south = cand.world_y_m
+        space_north = ws.height_m - cand.world_y_m
+        if space_north >= space_south:
+            approach_y = min(ws.height_m, cand.world_y_m + approach_offset_m)
+            heading = 270.0
+        else:
+            approach_y = max(0.0, cand.world_y_m - approach_offset_m)
+            heading = 90.0
+        shelves.append(
+            Shelf(
+                id=shelf_id,
+                x_m=cand.world_x_m,
+                y_m=cand.world_y_m,
+                width_m=shelf_width_m,
+                length_m=shelf_length_m,
+                rotation_deg=0.0,
+                approach_point=ApproachPoint(
+                    x_m=cand.world_x_m,
+                    y_m=approach_y,
+                    heading_deg=heading,
+                ),
+            )
+        )
+    return shelves
+
+
 def _band_from_range(rng: HsvRange) -> HsvBand:
     lo, hi = rng
     return HsvBand(
@@ -205,6 +352,9 @@ def _shelf_to_schema(s: Shelf) -> ShelfSchema:
             y_m=s.approach_point.y_m,
             heading_deg=s.approach_point.heading_deg,
         ),
+        sku_id=s.sku_id,
+        inventory_count=s.inventory_count,
+        capacity=s.capacity,
     )
 
 
@@ -221,6 +371,9 @@ def _schema_to_shelf(s: ShelfSchema) -> Shelf:
             y_m=s.approach_point.y_m,
             heading_deg=s.approach_point.heading_deg,
         ),
+        sku_id=s.sku_id,
+        inventory_count=s.inventory_count,
+        capacity=s.capacity,
     )
 
 
@@ -272,6 +425,13 @@ def get_settings():
             "resolution": list(settings.camera.resolution),
         },
         "planner": settings.planner.__dict__,
+        # Exposed so the Manual tab can build the ESP32 URL without
+        # hardcoding it. Browser fetches /cmd directly (skips backend).
+        "robot_link": {
+            "type": settings.robot_link.type,
+            "host": settings.robot_link.host,
+            "port": settings.robot_link.port,
+        },
     }
 
 
@@ -331,40 +491,13 @@ def auto_detect_shelves(request: AutoDetectShelvesRequest):
             },
         )
 
-    ws = settings.workspace
-    shelves: list[Shelf] = []
-    for i, cand in enumerate(candidates):
-        shelf_id = f"{request.id_prefix}{chr(ord('A') + i)}"
-
-        # Pick the side of the shelf (north vs south) that has room for the
-        # approach point. Whichever side of the shelf has more free workspace
-        # is chosen; the approach point is placed `approach_offset_m` into
-        # that free region and the heading is set so "drive forward" moves
-        # the robot toward the shelf.
-        space_south = cand.world_y_m                     # room below shelf
-        space_north = ws.height_m - cand.world_y_m       # room above shelf
-        if space_north >= space_south:
-            approach_y = min(ws.height_m, cand.world_y_m + request.approach_offset_m)
-            heading = 270.0  # -Y: facing the shelf from the north side
-        else:
-            approach_y = max(0.0, cand.world_y_m - request.approach_offset_m)
-            heading = 90.0   # +Y: facing the shelf from the south side
-
-        shelves.append(
-            Shelf(
-                id=shelf_id,
-                x_m=cand.world_x_m,
-                y_m=cand.world_y_m,
-                width_m=request.shelf_width_m,
-                length_m=request.shelf_length_m,
-                rotation_deg=0.0,
-                approach_point=ApproachPoint(
-                    x_m=cand.world_x_m,
-                    y_m=approach_y,
-                    heading_deg=heading,
-                ),
-            )
-        )
+    shelves = _shelves_from_candidates(
+        candidates, settings,
+        id_prefix=request.id_prefix,
+        approach_offset_m=request.approach_offset_m,
+        shelf_width_m=request.shelf_width_m,
+        shelf_length_m=request.shelf_length_m,
+    )
 
     if request.persist:
         save_shelves(shelves, Paths.shelves)
@@ -890,11 +1023,7 @@ def execute(request: ExecuteRequest):
         )
 
     sequence = plan_to_chars(waypoints, ws.cell_size_m)
-    result = send_sequence(
-        sequence,
-        port=request.port or DEFAULT_PORT,
-        baud=request.baud or DEFAULT_BAUD,
-    )
+    result = send_sequence(sequence, link_cfg=settings.robot_link)
     return ExecuteResponse(
         ok=result.ok,
         chars_sent=result.chars_sent,
@@ -980,21 +1109,56 @@ def execute_stream(request: ExecuteStreamRequest):
     intrinsics = _require_intrinsics()
     extrinsics = _require_extrinsics()
     settings = load_settings(Paths.settings)
-    shelves = load_shelves(Paths.shelves)
     cfg = settings.closed_loop
     ws = settings.workspace
 
-    # Resolve the destination shelf early so a typo errors out before streaming.
+    # Try the saved layout first. Only re-derive from the frame if the saved
+    # shelves don't include the destination — that's the signal that the
+    # saved state is stale or wrong for the current scene. Avoids stomping
+    # on a manual `PUT /shelves` whenever someone executes.
+    shelves = load_shelves(Paths.shelves)
+    if not _has_shelf(shelves, request.destination_shelf_id):
+        refreshed = _refresh_shelves_from_frame(intrinsics, extrinsics, settings)
+        if refreshed:
+            shelves = refreshed
+
+    # Resolve the destination (and source for pick_place) early so a typo
+    # errors out before streaming.
     try:
-        goal = goal_pose_for_shelf(shelves, request.destination_shelf_id)
+        dest_goal = goal_pose_for_shelf(shelves, request.destination_shelf_id)
     except KeyError as e:
         raise HTTPException(
             status_code=404,
             detail={"error": "unknown_shelf", "message": str(e)},
         )
 
-    port = request.port or DEFAULT_PORT
-    baud = request.baud or DEFAULT_BAUD
+    is_pick_place = request.task == "pick_place"
+    src_shelf_id: str | None = None
+    src_goal = None
+    src_shelf: Shelf | None = None
+    dest_shelf: Shelf | None = None
+    if is_pick_place:
+        src_shelf_id = request.source_shelf_id
+        if not src_shelf_id:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "source_shelf_id_required"},
+            )
+        try:
+            src_goal = goal_pose_for_shelf(shelves, src_shelf_id)
+        except KeyError as e:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_shelf", "message": str(e)},
+            )
+        src_shelf = next(s for s in shelves if s.id == src_shelf_id)
+        dest_shelf = next(s for s in shelves if s.id == request.destination_shelf_id)
+
+    link_cfg = settings.robot_link
+    # Build a dedicated WifiLink for this run when needed. /execute/stream
+    # calls grab_at / place_at on it for grab/place waypoints; bare drive
+    # chars still go through send_sequence (which routes the same way).
+    wifi_link = WifiLink(cfg=link_cfg) if link_cfg.type == "wifi" and not is_sim_mode() else None
 
     def gen():
         # Acquire here (not in the endpoint body) so the lock is released after
@@ -1006,6 +1170,10 @@ def execute_stream(request: ExecuteStreamRequest):
         history = StepHistory.empty()
         sequence_so_far = ""
         step_idx = 0
+
+        # Phase machine. For pick_place we navigate to source, run grab,
+        # navigate to dest, run place, done. For navigate we just go to dest.
+        phase = "to_source" if is_pick_place else "to_dest"
 
         try:
             while True:
@@ -1056,7 +1224,17 @@ def execute_stream(request: ExecuteStreamRequest):
                 pose = pose_from_detection(detected, ws.width_m, ws.height_m)
 
                 # --- Decide ---
-                if at_goal(pose, goal, cfg):
+                # Pick the active goal/shelf based on the current phase.
+                if phase == "to_source":
+                    active_goal = src_goal
+                    active_shelf_id = src_shelf_id
+                    active_shelf = src_shelf
+                else:
+                    active_goal = dest_goal
+                    active_shelf_id = request.destination_shelf_id
+                    active_shelf = dest_shelf
+
+                if at_goal(pose, active_goal, cfg):
                     annotated = draw_overlay(
                         frame, shelves, detected, waypoints=[],
                         intrinsics=intrinsics, extrinsics=extrinsics,
@@ -1065,15 +1243,69 @@ def execute_stream(request: ExecuteStreamRequest):
                     yield _sse_event("step", _build_step_payload(
                         step_idx, pose, None, sequence_so_far, _encode_image(annotated),
                     ))
-                    yield _sse_event("done", {
-                        "sequence": sequence_so_far,
-                        "steps": step_idx,
-                        "message": f"arrived at {request.destination_shelf_id}",
-                    })
-                    return
+
+                    # Reached the active goal. For pick_place phases, run
+                    # grab/place sequence and advance phase. For navigate
+                    # task, we're done.
+                    if not is_pick_place:
+                        yield _sse_event("done", {
+                            "sequence": sequence_so_far,
+                            "steps": step_idx,
+                            "message": f"arrived at {request.destination_shelf_id}",
+                        })
+                        return
+
+                    if phase == "to_source":
+                        action_label = "grab"
+                        ack_subs = _run_manipulator_sequence(
+                            wifi_link, link_cfg, action_label, active_shelf,
+                        )
+                    else:
+                        action_label = "place"
+                        ack_subs = _run_manipulator_sequence(
+                            wifi_link, link_cfg, action_label, active_shelf,
+                        )
+
+                    for sub in ack_subs:
+                        yield _sse_event("ack", {
+                            "step_idx": step_idx,
+                            "cmd": f"{action_label}:{sub.cmd}",
+                            "reply": sub.reply,
+                            "elapsed_ms": sub.elapsed_ms,
+                            "ok": sub.ok,
+                            **({"error": sub.error} if sub.error else {}),
+                        })
+
+                    if any(not sub.ok for sub in ack_subs):
+                        first_err = next(sub for sub in ack_subs if not sub.ok)
+                        yield _sse_event("error", {
+                            "error": f"{action_label}_failed",
+                            "message": first_err.error or f"{action_label} sequence failed at {first_err.cmd}",
+                            "sequence": sequence_so_far,
+                            "steps": step_idx,
+                        })
+                        return
+
+                    sequence_so_far += action_label[0].upper()  # 'G' or 'P'
+
+                    if phase == "to_source":
+                        phase = "to_dest"
+                        # Loop back to top — next iter will perceive and start
+                        # planning toward the destination.
+                        continue
+                    else:
+                        yield _sse_event("done", {
+                            "sequence": sequence_so_far,
+                            "steps": step_idx,
+                            "message": (
+                                f"picked from {src_shelf_id}, placed at "
+                                f"{request.destination_shelf_id}"
+                            ),
+                        })
+                        return
 
                 try:
-                    cmd = next_command(pose, request.destination_shelf_id, shelves, settings)
+                    cmd = next_command(pose, active_shelf_id, shelves, settings)
                 except (NoPathError, ApproachPointBlockedError) as e:
                     yield _sse_event("error", {
                         "error": "no_path",
@@ -1105,7 +1337,7 @@ def execute_stream(request: ExecuteStreamRequest):
                 ))
 
                 # --- Act ---
-                result = send_sequence(cmd, port=port, baud=baud)
+                result = send_sequence(cmd, link_cfg=link_cfg)
                 ack_payload = {
                     "step_idx": step_idx,
                     "cmd": cmd,
@@ -1157,16 +1389,14 @@ def robot_send(request: RobotSendRequest):
     planner. Used by the manual-control buttons in the web UI and by any
     low-level debugging / motor calibration flow.
 
-    The firmware protocol chars are: F (forward one cell), B (backward),
-    L (turn left 90°), R (turn right 90°), G (grab placeholder),
-    P (place placeholder), S (stop), ? (ping → PONG).
+    Drive chars (F/B/L/R/S) go through the WiFi link's drive composites.
+    Multi-step grab/place sequences are not exposed via /robot/send — use
+    /execute/stream for those. /robot/send is for low-level motor checks
+    only.
     """
     sequence = request.sequence or ""
-    result = send_sequence(
-        sequence,
-        port=request.port or DEFAULT_PORT,
-        baud=request.baud or DEFAULT_BAUD,
-    )
+    settings = load_settings(Paths.settings)
+    result = send_sequence(sequence, link_cfg=settings.robot_link)
     return ExecuteResponse(
         ok=result.ok,
         chars_sent=result.chars_sent,
@@ -1176,4 +1406,618 @@ def robot_send(request: RobotSendRequest):
             for e in result.log
         ],
         error=result.error,
+    )
+
+
+# --- Canned (no-vision) pick-place ----------------------------------------
+#
+# For physical bringup before ArUco markers are installed. The operator
+# places the robot at a known starting pose (gripper-back facing the source
+# shelf) and clicks "Run Planned". The backend dead-reckons the move using
+# cell_drive_ms × cells from saved shelf coords. No planner, no vision, no
+# closed loop. Drift is not corrected. Use only as a smoke test.
+
+@router.post("/execute/canned", response_model=CannedExecuteResponse)
+def execute_canned(request: CannedExecuteRequest):
+    """Run a hardcoded pick-place sequence between two shelves.
+
+    Sequence (gripper mounted on robot's back):
+      1. grab_at(from.floor_distance_cm)  -- lift, slider out, close, slider in, lift to travel
+      2. drive forward by Δy / cell_size cells  -- robot drives away from source toward dest
+      3. place_at(to.floor_distance_cm)   -- lift, slider out, open, slider in, lift to travel
+
+    The operator is responsible for the starting pose and orientation.
+    """
+    if _run_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "execute_already_running"},
+        )
+
+    settings = load_settings(Paths.settings)
+    if settings.robot_link.type == "sim":
+        # Sim mode would silently "succeed" and do nothing physical, which is
+        # misleading for a button labeled "Run Planned". Force the user to
+        # flip robot_link.type=wifi before running real moves.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "sim_mode",
+                "message": "robot_link.type is 'sim' — set type=wifi in settings.yaml to run on real hardware.",
+            },
+        )
+
+    shelves = load_shelves(Paths.shelves)
+    src = next((s for s in shelves if s.id == request.from_shelf), None)
+    dst = next((s for s in shelves if s.id == request.to_shelf), None)
+    if src is None or dst is None:
+        missing = [
+            sid for sid, s in
+            ((request.from_shelf, src), (request.to_shelf, dst)) if s is None
+        ]
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_shelf", "message": f"unknown shelf id(s): {missing}"},
+        )
+
+    from vision.src.robot.wifi_link import WifiLink
+
+    if not _run_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "execute_already_running"},
+        )
+
+    steps: list[CannedExecuteStep] = []
+
+    def push(label: str, ack) -> bool:
+        steps.append(CannedExecuteStep(
+            label=label, ok=ack.ok, elapsed_ms=ack.elapsed_ms,
+            reply=ack.reply, error=ack.error,
+        ))
+        return ack.ok
+
+    try:
+        link = WifiLink(cfg=settings.robot_link)
+
+        # 1. Grab from source. Closed-loop lift via the carriage's upward-facing
+        #    ultrasonic — drive the lift until the sensor reports the target
+        #    floor_distance_cm (5 cm = top, 15 cm = mid, 25 cm = bottom). Falls
+        #    back to no-lift when floor_distance_cm is None (legacy / transit).
+        for sub in link.grab_at(src.floor_distance_cm):
+            if not push(f"grab:{sub.cmd}", sub):
+                return CannedExecuteResponse(
+                    ok=False, from_shelf=request.from_shelf, to_shelf=request.to_shelf,
+                    steps=steps, error=f"grab failed at {sub.cmd}: {sub.error or sub.reply}",
+                )
+
+        # 2. Move from source shelf to destination shelf. Hardcoded 4-step
+        #    sequence with timings tuned per workspace. Skipped entirely if
+        #    the two shelves share the same approach point (different floors
+        #    of the same physical shelf — robot doesn't need to move).
+        rl = settings.robot_link
+        same_column = (
+            src.approach_point.x_m == dst.approach_point.x_m
+            and src.approach_point.y_m == dst.approach_point.y_m
+        )
+        if not same_column:
+            move_steps = [
+                ("move:back", lambda: link.drive_backward(rl.move_back_after_grab_ms)),
+                (
+                    "move:turn1",
+                    (
+                        lambda: link.turn_left(rl.move_turn_ms)
+                        if rl.move_turn_dir == "L"
+                        else link.turn_right(rl.move_turn_ms)
+                    ),
+                ),
+                ("move:forward", lambda: link.drive_forward(rl.move_forward_to_dest_ms)),
+                (
+                    "move:turn2",
+                    (
+                        lambda: link.turn_right(rl.move_turn_ms)
+                        if rl.move_turn_dir == "L"
+                        else link.turn_left(rl.move_turn_ms)
+                    ),
+                ),
+            ]
+            for label, action in move_steps:
+                ack = action()
+                if not push(label, ack):
+                    return CannedExecuteResponse(
+                        ok=False, from_shelf=request.from_shelf, to_shelf=request.to_shelf,
+                        steps=steps,
+                        error=f"{label} failed: {ack.error or ack.reply}",
+                    )
+
+        # 3. Place at destination — closed-loop lift to dst.floor_distance_cm.
+        for sub in link.place_at(dst.floor_distance_cm):
+            if not push(f"place:{sub.cmd}", sub):
+                return CannedExecuteResponse(
+                    ok=False, from_shelf=request.from_shelf, to_shelf=request.to_shelf,
+                    steps=steps, error=f"place failed at {sub.cmd}: {sub.error or sub.reply}",
+                )
+
+        return CannedExecuteResponse(
+            ok=True, from_shelf=request.from_shelf, to_shelf=request.to_shelf, steps=steps,
+        )
+    finally:
+        _run_lock.release()
+
+
+# --- Inventory: orders + state + auto-replenish ----------------------------
+#
+# Phase 1a — order queue and inventory bookkeeping. Phase 1b (the
+# dispatcher that actually consumes orders and drives the robot) will be
+# added once physical testing of the closed-loop is done so we know what
+# failure handling needs to look like. Right now orders just sit on the
+# queue waiting to be dispatched; manual /execute or /execute/stream
+# remains the way to actually move the robot.
+
+def _require_orders() -> OrderQueue:
+    if _orders is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "orders_not_configured"},
+        )
+    return _orders
+
+
+def _order_to_schema(o: Order) -> OrderSchema:
+    return OrderSchema(
+        id=o.id, sku_id=o.sku_id,
+        source_shelf_id=o.source_shelf_id,
+        destination_shelf_id=o.destination_shelf_id,
+        qty=o.qty, status=o.status,
+        created_at=o.created_at,
+        started_at=o.started_at,
+        finished_at=o.finished_at,
+        error=o.error, reason=o.reason,
+    )
+
+
+def _proposal_to_schema(p: ReplenishProposal) -> ReplenishProposalSchema:
+    return ReplenishProposalSchema(
+        sku_id=p.sku_id,
+        source_shelf_id=p.source_shelf_id,
+        destination_shelf_id=p.destination_shelf_id,
+        qty=p.qty, reason=p.reason,
+    )
+
+
+@router.get("/orders", response_model=OrdersListResponse)
+def orders_list(status: str | None = None, limit: int = 100):
+    """List orders, newest first. Optional `status` filter (one of
+    pending/running/done/failed/cancelled)."""
+    orders = _require_orders()
+    if status is not None and status not in (
+        "pending", "running", "done", "failed", "cancelled"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_status", "value": status},
+        )
+    items = orders.list_orders(status=status, limit=limit)
+    return OrdersListResponse(orders=[_order_to_schema(o) for o in items])
+
+
+@router.post("/orders", response_model=OrderSchema, status_code=201)
+def orders_create(request: OrderCreateRequest):
+    """Enqueue a new pick-and-place order. Validates that source and
+    destination shelves exist before accepting."""
+    orders = _require_orders()
+    shelves = {s.id: s for s in load_shelves(Paths.shelves)}
+    for shelf_id in (request.source_shelf_id, request.destination_shelf_id):
+        if shelf_id not in shelves:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_shelf", "shelf_id": shelf_id},
+            )
+    try:
+        order = orders.enqueue(
+            sku_id=request.sku_id,
+            source_shelf_id=request.source_shelf_id,
+            destination_shelf_id=request.destination_shelf_id,
+            qty=request.qty,
+            reason=request.reason,
+        )
+    except OrderQueueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_order", "message": str(e)})
+    return _order_to_schema(order)
+
+
+@router.get("/orders/{order_id}", response_model=OrderSchema)
+def orders_get(order_id: int):
+    orders = _require_orders()
+    try:
+        return _order_to_schema(orders.get(order_id))
+    except OrderQueueError:
+        raise HTTPException(status_code=404, detail={"error": "unknown_order", "id": order_id})
+
+
+@router.delete("/orders/{order_id}", response_model=OrderSchema)
+def orders_cancel(order_id: int):
+    """Cancel a pending order. Returns 409 if it's already running/done."""
+    orders = _require_orders()
+    try:
+        cancelled = orders.cancel(order_id)
+    except OrderQueueError as e:
+        msg = str(e)
+        if "unknown" in msg:
+            raise HTTPException(status_code=404, detail={"error": "unknown_order", "id": order_id})
+        raise HTTPException(status_code=409, detail={"error": "cannot_cancel", "message": msg})
+    return _order_to_schema(cancelled)
+
+
+@router.get("/inventory", response_model=InventoryResponse)
+def inventory_get():
+    """Current per-shelf and per-SKU stock totals.
+
+    Source of truth is shelves.json. The dispatcher (Phase 1b) will update
+    the file after each successful place; for now you can edit shelves
+    manually via the Layout Editor or PUT /shelves."""
+    shelves = load_shelves(Paths.shelves)
+    shelf_inv = [
+        ShelfInventory(
+            shelf_id=s.id, sku_id=s.sku_id,
+            inventory_count=s.inventory_count, capacity=s.capacity,
+        )
+        for s in shelves
+    ]
+    by_sku: dict[str, dict] = {}
+    for s in shelves:
+        if s.sku_id is None:
+            continue
+        bucket = by_sku.setdefault(
+            s.sku_id, {"total": 0, "capacity": 0, "shelves": []},
+        )
+        bucket["total"] += s.inventory_count
+        bucket["capacity"] += s.capacity
+        bucket["shelves"].append(s.id)
+    skus = [
+        SkuTotal(sku_id=k, total=v["total"], capacity=v["capacity"], shelves=v["shelves"])
+        for k, v in sorted(by_sku.items())
+    ]
+    return InventoryResponse(shelves=shelf_inv, skus=skus)
+
+
+@router.post("/replenish/preview", response_model=ReplenishPreviewResponse)
+def replenish_preview(request: ReplenishRunRequest):
+    """Dry-run the auto-replenish brain — returns what it *would* enqueue
+    without actually creating orders. Useful for the dashboard's "preview"
+    button so the user sees the plan before committing."""
+    shelves = load_shelves(Paths.shelves)
+    kwargs = {}
+    if request.threshold_fraction is not None:
+        kwargs["threshold_fraction"] = request.threshold_fraction
+    try:
+        proposals = replenish_plan(shelves, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_threshold", "message": str(e)})
+    return ReplenishPreviewResponse(
+        proposals=[_proposal_to_schema(p) for p in proposals],
+    )
+
+
+@router.post("/replenish/run", response_model=ReplenishRunResponse)
+def replenish_run(request: ReplenishRunRequest):
+    """Run the brain and enqueue its proposals. Skips proposals that
+    would duplicate an already-pending order (same source/dest/SKU) so
+    repeatedly clicking the button doesn't pile up identical orders."""
+    orders = _require_orders()
+    shelves = load_shelves(Paths.shelves)
+    kwargs = {}
+    if request.threshold_fraction is not None:
+        kwargs["threshold_fraction"] = request.threshold_fraction
+    try:
+        proposals = replenish_plan(shelves, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_threshold", "message": str(e)})
+
+    pending = orders.list_orders(status="pending", limit=1000)
+    pending_keys = {
+        (o.sku_id, o.source_shelf_id, o.destination_shelf_id) for o in pending
+    }
+
+    enqueued: list[OrderSchema] = []
+    skipped: list[ReplenishProposalSchema] = []
+    for p in proposals:
+        key = (p.sku_id, p.source_shelf_id, p.destination_shelf_id)
+        if key in pending_keys:
+            skipped.append(_proposal_to_schema(p))
+            continue
+        try:
+            order = orders.enqueue(
+                sku_id=p.sku_id,
+                source_shelf_id=p.source_shelf_id,
+                destination_shelf_id=p.destination_shelf_id,
+                qty=p.qty,
+                reason=p.reason,
+            )
+            enqueued.append(_order_to_schema(order))
+            pending_keys.add(key)
+        except OrderQueueError:
+            skipped.append(_proposal_to_schema(p))
+
+    return ReplenishRunResponse(enqueued=enqueued, skipped=skipped)
+
+
+# --- Manual inventory edits + dispatcher -----------------------------------
+
+@router.put("/inventory/shelf/{shelf_id}", response_model=ShelfInventory)
+def inventory_update_shelf(shelf_id: str, request: ShelfInventoryUpdate):
+    """Set the SKU + count on one shelf and persist to shelves.json.
+
+    Used by the Inventory tab to mark slots filled/empty manually (demo /
+    operator override). Clamps count to [0, capacity]."""
+    shelves = load_shelves(Paths.shelves)
+    target = next((s for s in shelves if s.id == shelf_id), None)
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_shelf", "shelf_id": shelf_id},
+        )
+    new_count = max(0, request.inventory_count)
+    if target.capacity > 0:
+        new_count = min(new_count, target.capacity)
+    new_sku = request.sku_id if new_count > 0 else (target.sku_id if request.sku_id is None else request.sku_id)
+    updated = [
+        Shelf(
+            id=s.id, x_m=s.x_m, y_m=s.y_m,
+            width_m=s.width_m, length_m=s.length_m,
+            rotation_deg=s.rotation_deg,
+            approach_point=s.approach_point,
+            sku_id=new_sku if s.id == shelf_id else s.sku_id,
+            inventory_count=new_count if s.id == shelf_id else s.inventory_count,
+            capacity=s.capacity,
+            floor_distance_cm=s.floor_distance_cm,
+            lift_up_ms=s.lift_up_ms,
+            lift_down_ms=s.lift_down_ms,
+        )
+        for s in shelves
+    ]
+    save_shelves(updated, Paths.shelves)
+    edited = next(s for s in updated if s.id == shelf_id)
+    return ShelfInventory(
+        shelf_id=edited.id, sku_id=edited.sku_id,
+        inventory_count=edited.inventory_count, capacity=edited.capacity,
+    )
+
+
+def _adjust_shelf_count(shelf_id: str, delta: int) -> None:
+    """Increment / decrement a shelf's inventory_count and persist. Clamps
+    to [0, capacity]. Used after a successful dispatched pick-place."""
+    shelves = load_shelves(Paths.shelves)
+    updated: list[Shelf] = []
+    for s in shelves:
+        if s.id != shelf_id:
+            updated.append(s)
+            continue
+        new_count = max(0, s.inventory_count + delta)
+        if s.capacity > 0:
+            new_count = min(new_count, s.capacity)
+        updated.append(Shelf(
+            id=s.id, x_m=s.x_m, y_m=s.y_m,
+            width_m=s.width_m, length_m=s.length_m,
+            rotation_deg=s.rotation_deg,
+            approach_point=s.approach_point,
+            sku_id=s.sku_id,
+            inventory_count=new_count,
+            capacity=s.capacity,
+            floor_distance_cm=s.floor_distance_cm,
+            lift_up_ms=s.lift_up_ms,
+            lift_down_ms=s.lift_down_ms,
+        ))
+    save_shelves(updated, Paths.shelves)
+
+
+@router.post("/orders/run-next", response_model=RunNextOrderResponse)
+def orders_run_next():
+    """Pop the oldest pending order, run it via canned-execute, update
+    shelf inventory_count on success.
+
+    Single-shot: one click = one order. If the order has qty>1 we still
+    only run a single move and decrement qty by 1 (so repeated clicks chip
+    away at it). Sim mode is rejected the same way /execute/canned is —
+    the button is meant to drive real hardware."""
+    orders = _require_orders()
+    pending = orders.next_pending()
+    if pending is None:
+        return RunNextOrderResponse(ok=True, message="No pending orders.")
+
+    # execute_canned validates lock + sim-mode itself, but we pre-check sim
+    # so we don't mark the order running just to fail validation.
+    settings = load_settings(Paths.settings)
+    if settings.robot_link.type == "sim":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "sim_mode",
+                "message": "robot_link.type is 'sim' — flip to wifi in settings.yaml first.",
+            },
+        )
+
+    orders.update_status(pending.id, "running")
+    try:
+        executed = execute_canned(
+            CannedExecuteRequest(
+                from_shelf=pending.source_shelf_id,
+                to_shelf=pending.destination_shelf_id,
+            )
+        )
+    except HTTPException as e:
+        orders.update_status(pending.id, "failed", error=str(e.detail))
+        raise
+    except Exception as e:
+        orders.update_status(pending.id, "failed", error=f"{type(e).__name__}: {e}")
+        raise
+
+    if not executed.ok:
+        final = orders.update_status(
+            pending.id, "failed", error=executed.error or "canned_execute_failed",
+        )
+        return RunNextOrderResponse(
+            ok=False, order=_order_to_schema(final), executed=executed,
+            message=executed.error or "Robot move failed.",
+        )
+
+    # Move succeeded: bookkeeping. -1 from source, +1 to destination.
+    _adjust_shelf_count(pending.source_shelf_id, -1)
+    _adjust_shelf_count(pending.destination_shelf_id, +1)
+
+    # If the order asked for more than 1 unit, leave a follow-up pending
+    # order with qty-1 so a future click keeps moving units. Simpler than
+    # mutating qty in place + re-pending.
+    if pending.qty > 1:
+        orders.enqueue(
+            sku_id=pending.sku_id,
+            source_shelf_id=pending.source_shelf_id,
+            destination_shelf_id=pending.destination_shelf_id,
+            qty=pending.qty - 1,
+            reason=f"continuation of #{pending.id}",
+        )
+    final = orders.update_status(pending.id, "done")
+    return RunNextOrderResponse(
+        ok=True, order=_order_to_schema(final), executed=executed,
+        message=f"Order #{pending.id} completed.",
+    )
+
+
+# --- Movement plans (named operator-built sequences) -----------------------
+#
+# Editor lives in the Calibration tab; the operator builds a plan as an
+# ordered list of low-level steps (drive, lift, slider, gripper, wait) and
+# saves it under a name. Plans are persisted in vision/state/movement_plans
+# .json and run sequentially. Sim is allowed (uses FakeMovementLink).
+
+from vision.src.robot.movement_plans import (  # noqa: E402
+    MovementPlan, MovementStep, MovementPlansError,
+    list_plans as mp_list, get_plan as mp_get,
+    save_plan as mp_save, delete_plan as mp_delete,
+    execute_plan as mp_execute, FakeMovementLink,
+)
+
+
+def _plan_to_schema(p: MovementPlan) -> MovementPlanSchema:
+    return MovementPlanSchema(
+        name=p.name,
+        steps=[
+            MovementStepSchema(
+                type=s.type, duration_ms=s.duration_ms,
+                target_cm=s.target_cm, note=s.note,
+            )
+            for s in p.steps
+        ],
+        note=p.note,
+    )
+
+
+def _schema_to_plan(s: MovementPlanSchema) -> MovementPlan:
+    return MovementPlan(
+        name=s.name,
+        steps=[
+            MovementStep(
+                type=st.type, duration_ms=st.duration_ms,
+                target_cm=st.target_cm, note=st.note,
+            )
+            for st in s.steps
+        ],
+        note=s.note,
+    )
+
+
+@router.get("/plans", response_model=MovementPlansListResponse)
+def plans_list():
+    """List all saved movement plans, sorted by name."""
+    return MovementPlansListResponse(
+        plans=[_plan_to_schema(p) for p in mp_list(Paths.movement_plans)],
+    )
+
+
+@router.put("/plans/{name}", response_model=MovementPlanSchema)
+def plans_upsert(name: str, request: MovementPlanSchema):
+    """Save a plan under `name`. The body's name field is ignored — the URL
+    path is authoritative so the UI can rename without doing a delete + put."""
+    plan = _schema_to_plan(MovementPlanSchema(
+        name=name, steps=request.steps, note=request.note,
+    ))
+    try:
+        mp_save(Paths.movement_plans, plan)
+    except MovementPlansError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_plan", "message": str(e)},
+        )
+    return _plan_to_schema(plan)
+
+
+@router.delete("/plans/{name}")
+def plans_delete(name: str):
+    try:
+        mp_delete(Paths.movement_plans, name)
+    except MovementPlansError as e:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_plan", "message": str(e)},
+        )
+    return {"ok": True}
+
+
+@router.post("/plans/{name}/run", response_model=MovementPlanRunResponse)
+def plans_run(name: str):
+    """Execute a saved plan against the configured robot link.
+
+    Sim is allowed: when robot_link.type is 'sim' (or _sim_override is True
+    via /robot/mode) we run against an in-process FakeMovementLink that
+    sleeps for realistic durations but doesn't touch hardware. Useful for
+    rehearsing a plan before flipping to wifi.
+    """
+    if _run_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "execute_already_running"},
+        )
+    try:
+        plan = mp_get(Paths.movement_plans, name)
+    except MovementPlansError:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_plan", "name": name},
+        )
+
+    settings = load_settings(Paths.settings)
+    sim = is_sim_mode() or settings.robot_link.type == "sim"
+    if sim:
+        link = FakeMovementLink()
+    else:
+        link = WifiLink(cfg=settings.robot_link)
+
+    if not _run_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "execute_already_running"},
+        )
+
+    steps_out: list[CannedExecuteStep] = []
+    error: str | None = None
+    ok = True
+    try:
+        for result in mp_execute(link, plan):
+            steps_out.append(CannedExecuteStep(
+                label=result.label, ok=result.ok,
+                elapsed_ms=result.elapsed_ms, reply=result.reply,
+                error=result.error,
+            ))
+            if not result.ok:
+                ok = False
+                error = result.error or f"{result.label} failed"
+                break
+    except MovementPlansError as e:
+        ok = False
+        error = str(e)
+    finally:
+        _run_lock.release()
+
+    return MovementPlanRunResponse(
+        ok=ok, plan_name=name, steps=steps_out, error=error, sim=sim,
     )

@@ -12,6 +12,12 @@ export type Shelf = {
   length_m: number;
   rotation_deg: number;
   approach_point: ApproachPoint;
+  sku_id?: string | null;
+  inventory_count?: number;
+  capacity?: number;
+  // Lift target on the carriage's upward-facing ultrasonic. Smaller cm =
+  // higher floor. Null/undefined for legacy single-floor shelves.
+  floor_distance_cm?: number | null;
 };
 
 export type CalibrationStatus = {
@@ -55,6 +61,7 @@ export type Settings = {
   };
   camera: { source: number | string; resolution: [number, number] };
   planner: { obstacle_inflation_m: number };
+  robot_link?: { type: "wifi" | "sim"; host: string; port: number };
 };
 
 export type ApiError = { error: string; message?: string; details?: unknown };

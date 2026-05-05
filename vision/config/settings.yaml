@@ -29,7 +29,7 @@ camera:
   # Phone-on-hotspot setup: phone reaches the laptop directly on the hotspot
   # subnet (192.168.137.x by default on Windows). College LAN doesn't need to
   # see the phone — they're separate adapters.
-  source: "http://192.168.137.19:8080/video"
+  source: "http://100.76.117.211:8080/video"
   resolution: [1280, 720]
 planner:
   obstacle_inflation_m: 0.10
@@ -39,3 +39,43 @@ closed_loop:
   max_steps: 50                       # ~100 s max run at typical step times
   stuck_position_threshold_m: 0.05    # min progress per F to count as moving
   stuck_window_steps: 3               # consecutive Fs below threshold -> abort
+robot_link:
+  # type: "wifi" -> HTTP to ESP32 (production hardware path)
+  #       "sim"  -> in-process fake, no network. Used for tests / demos.
+  type: wifi
+  host: "10.82.225.95"
+  port: 80
+  # Drive timing. The ESP32 has no encoders, so each F/B/L/R becomes a
+  # timed pulse: send char, sleep, send stop. The closed-loop controller
+  # corrects drift via vision so these only need to be close, not exact.
+  cell_drive_ms: 12500       # ~12.5s per cell
+  turn_90_ms: 5500           # measured: 7500ms = ~120°, scaled down for ~90°
+  # Manipulator timing for the multi-step grab/place sequences.
+  # Slider durations are physical constants of the lead-screw — fixed, do
+  # not adjust per shelf. Asymmetric because the screw has slight friction
+  # difference between in and out directions.
+  slider_extend_ms: 2000     # OUT command duration (fixed — hardware safety)
+  slider_retract_ms: 2100    # IN command duration (fixed — hardware safety)
+  gripper_settle_ms: 400
+  # Move-between-shelves sequence (canned-execute, no vision). After grab,
+  # robot drives back to clear the source shelf, turns, drives forward to
+  # the destination, turns again to align with the destination shelf face.
+  # Tune by watching where the robot ends up and editing one knob at a time.
+  move_back_after_grab_ms: 7500    # drive back to clear source
+  move_turn_ms: 5500               # ~90° turn (matches turn_90_ms above)
+  move_turn_dir: "L"               # "L" or "R" — first turn direction
+  move_forward_to_dest_ms: 15000   # drive toward destination
+  # Lift control. The ultrasonic on the carriage points up at the mast top.
+  # Smaller distance = higher floor. travel_distance_cm is the rest position
+  # (also doubles as the bottom-floor target — shelf_*_a uses this value).
+  travel_distance_cm: 25.0
+  lift_tolerance_cm: 2.0
+  # Lift safety guards — both DISABLED by default (set <= 0) so lift_to
+  # runs at full power until it physically reaches the target distance,
+  # however long that takes. The heartbeat thread keeps the motor alive
+  # past the ESP32's 300ms watchdog. Re-enable these (positive values) if
+  # you want jam protection during long unattended runs.
+  lift_stall_window_ms: 0
+  lift_min_progress_cm: 0
+  lift_max_runtime_ms: 0
+  request_timeout_s: 5.0       # generous — ESP32 occasionally blocks while serving

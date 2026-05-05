@@ -6,7 +6,7 @@ import yaml
 from vision.src.detection.hsv_ranges import HsvRange
 from vision.src.models import (
     Settings, WorkspaceConfig, RobotConfig, RobotMarkers, CameraConfig,
-    PlannerConfig, ClosedLoopConfig, Shelf, ApproachPoint,
+    PlannerConfig, ClosedLoopConfig, RobotLinkConfig, Shelf, ApproachPoint,
 )
 
 
@@ -33,6 +33,7 @@ def load_settings(path: Path) -> Settings:
                 obstacle_inflation_m=float(data["planner"]["obstacle_inflation_m"]),
             ),
             closed_loop=_parse_closed_loop(data.get("closed_loop") or {}),
+            robot_link=_parse_robot_link(data.get("robot_link") or {}),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ConfigError(f"Malformed settings.yaml: {e}") from e
@@ -81,12 +82,46 @@ def _parse_closed_loop(data: dict) -> ClosedLoopConfig:
     )
 
 
+_VALID_LINK_TYPES = {"wifi", "sim"}
+
+
+def _parse_robot_link(data: dict) -> RobotLinkConfig:
+    """robot_link section is optional; missing keys fall back to dataclass defaults."""
+    defaults = RobotLinkConfig()
+    link_type = str(data.get("type", defaults.type)).strip().lower()
+    if link_type not in _VALID_LINK_TYPES:
+        raise ConfigError(
+            f"robot_link.type must be one of {sorted(_VALID_LINK_TYPES)}, got {link_type!r}"
+        )
+    return RobotLinkConfig(
+        type=link_type,
+        host=str(data.get("host", defaults.host)),
+        port=int(data.get("port", defaults.port)),
+        cell_drive_ms=int(data.get("cell_drive_ms", defaults.cell_drive_ms)),
+        turn_90_ms=int(data.get("turn_90_ms", defaults.turn_90_ms)),
+        slider_extend_ms=int(data.get("slider_extend_ms", defaults.slider_extend_ms)),
+        slider_retract_ms=int(data.get("slider_retract_ms", defaults.slider_retract_ms)),
+        gripper_settle_ms=int(data.get("gripper_settle_ms", defaults.gripper_settle_ms)),
+        move_back_after_grab_ms=int(data.get("move_back_after_grab_ms", defaults.move_back_after_grab_ms)),
+        move_turn_ms=int(data.get("move_turn_ms", defaults.move_turn_ms)),
+        move_turn_dir=str(data.get("move_turn_dir", defaults.move_turn_dir)).strip().upper(),
+        move_forward_to_dest_ms=int(data.get("move_forward_to_dest_ms", defaults.move_forward_to_dest_ms)),
+        travel_distance_cm=float(data.get("travel_distance_cm", defaults.travel_distance_cm)),
+        lift_tolerance_cm=float(data.get("lift_tolerance_cm", defaults.lift_tolerance_cm)),
+        lift_stall_window_ms=int(data.get("lift_stall_window_ms", defaults.lift_stall_window_ms)),
+        lift_min_progress_cm=float(data.get("lift_min_progress_cm", defaults.lift_min_progress_cm)),
+        lift_max_runtime_ms=int(data.get("lift_max_runtime_ms", defaults.lift_max_runtime_ms)),
+        request_timeout_s=float(data.get("request_timeout_s", defaults.request_timeout_s)),
+    )
+
+
 def load_shelves(path: Path) -> list[Shelf]:
     with path.open("r") as f:
         data = json.load(f)
     shelves = []
     for raw in data["shelves"]:
         try:
+            sku_id_raw = raw.get("sku_id")
             shelves.append(Shelf(
                 id=str(raw["id"]),
                 x_m=float(raw["x_m"]),
@@ -99,6 +134,18 @@ def load_shelves(path: Path) -> list[Shelf]:
                     y_m=float(raw["approach_point"]["y_m"]),
                     heading_deg=float(raw["approach_point"]["heading_deg"]),
                 ),
+                # Inventory fields are optional — older shelves.json files
+                # without them keep loading; new fields default to "untracked".
+                sku_id=str(sku_id_raw) if sku_id_raw is not None else None,
+                inventory_count=int(raw.get("inventory_count", 0)),
+                capacity=int(raw.get("capacity", 0)),
+                floor_distance_cm=(
+                    float(raw["floor_distance_cm"])
+                    if raw.get("floor_distance_cm") is not None
+                    else None
+                ),
+                lift_up_ms=int(raw.get("lift_up_ms", 0)),
+                lift_down_ms=int(raw.get("lift_down_ms", 0)),
             ))
         except (KeyError, TypeError, ValueError) as e:
             raise ConfigError(f"Malformed shelf entry: {e}") from e
@@ -161,6 +208,15 @@ def save_shelves(shelves: list[Shelf], path: Path) -> None:
                     "y_m": s.approach_point.y_m,
                     "heading_deg": s.approach_point.heading_deg,
                 },
+                # Always write inventory fields (even if defaults) so the
+                # JSON shape is uniform across shelves and the dashboard
+                # doesn't have to special-case missing keys.
+                "sku_id": s.sku_id,
+                "inventory_count": s.inventory_count,
+                "capacity": s.capacity,
+                "floor_distance_cm": s.floor_distance_cm,
+                "lift_up_ms": s.lift_up_ms,
+                "lift_down_ms": s.lift_down_ms,
             }
             for s in shelves
         ]
